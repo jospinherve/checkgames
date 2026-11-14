@@ -62,6 +62,7 @@
   const member = (id) => st && st.members.find((m) => m.id === id);
   const nameOf = (id) => (st && id === st.you ? 'Tu' : (member(id) || {}).name || '?');
   const isHost = () => st && st.hostId === st.you;
+  const waitingCount = () => (st && st.game ? st.members.filter((m) => !m.inGame).length : 0);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   function show(screen) {
@@ -144,12 +145,36 @@
   });
   $('sMode').onchange = () => socket.emit('settings', { ...st.settings, mode: $('sMode').value }, () => {});
   $('btnStart').onclick = () => socket.emit('start', {}, (r) => { $('lobbyErr').textContent = r.error || ''; });
-  function quit() {
-    socket.emit('leave', {}, () => {});
+  function backHome() {
     clearSession(); st = null; selected = null; lastTopId = null; lastTurnId = null; prevPhase = null;
-    ['quitModal', 'endModal', 'suitModal', 'restartModal'].forEach((id) => $(id).classList.add('hidden'));
+    ['quitModal', 'endModal', 'suitModal', 'restartModal', 'kickModal', 'reactTray'].forEach((id) => $(id).classList.add('hidden'));
     show('home');
   }
+  function quit() {
+    socket.emit('leave', {}, () => {});
+    backHome();
+  }
+  // Exclu par l'hôte
+  socket.on('kicked', () => {
+    backHome();
+    $('homeErr').textContent = "L'hôte t'a exclu de la partie.";
+  });
+
+  // ---------- Exclure un joueur (hôte) ----------
+  let kickTarget = null;
+  function openKick(id) {
+    const m = member(id);
+    if (!m || !isHost() || id === st.you) return;
+    kickTarget = id;
+    $('kickTitle').textContent = `Exclure ${m.name} ?`;
+    $('kickModal').classList.remove('hidden');
+  }
+  $('kickNo').onclick = () => { $('kickModal').classList.add('hidden'); kickTarget = null; };
+  $('kickYes').onclick = () => {
+    $('kickModal').classList.add('hidden');
+    if (kickTarget) socket.emit('kick', { id: kickTarget }, (r) => r.error && toast(esc(r.error), 'bad'));
+    kickTarget = null;
+  };
   $('btnLeave').onclick = quit;
   $('btnQuit').onclick = () => $('quitModal').classList.remove('hidden');
   $('quitNo').onclick = () => $('quitModal').classList.add('hidden');
@@ -169,7 +194,9 @@
     $('lobbyPlayers').innerHTML = st.members.map((m) => `<li>
       <div class="avatar${m.connected ? '' : ' away'}">${esc(initials(m.name))}</div>
       <span>${esc(m.name)}${m.id === st.you ? ' <span class="muted">(toi)</span>' : ''}</span>
-      ${m.id === st.hostId ? '<span class="host">Hôte</span>' : ''}</li>`).join('');
+      ${m.id === st.hostId ? '<span class="host">Hôte</span>' : ''}
+      ${isHost() && m.id !== st.you ? `<button class="kick" data-kick="${esc(m.id)}" aria-label="Exclure">✕</button>` : ''}</li>`).join('');
+    $('lobbyPlayers').querySelectorAll('[data-kick]').forEach((b) => { b.onclick = () => openKick(b.dataset.kick); });
     $('sHand').textContent = st.settings.handSize;
     $('sMode').value = st.settings.mode;
     $('sTarget').textContent = st.settings.target;
@@ -233,17 +260,19 @@
     $('gCode').textContent = st.code;
     $('btnRestart').classList.toggle('hidden', !(isHost() && st.phase === 'playing'));
     $('gRound').textContent = `Manche ${st.roundsPlayed + (st.phase === 'playing' ? 1 : 0)} · ` +
-      (s.mode === 'wins' ? `premier à ${s.target}` : `${s.target} manches`) + (st.tiebreak ? ' · décisive' : '');
+      (s.mode === 'wins' ? `premier à ${s.target}` : `${s.target} manches`) + (st.tiebreak ? ' · décisive' : '') +
+      (st.phase === 'playing' && waitingCount() ? ` · ${waitingCount()} attend` : '');
 
     // Adversaires dans l'ordre de jeu, en partant de moi
     const order = g.players.map((p) => p.id);
     const me = order.indexOf(st.you);
-    const others = order.slice(me + 1).concat(order.slice(0, me));
+    // Spectateur (arrivé pendant la manche) : il voit tous les joueurs
+    const others = me < 0 ? order : order.slice(me + 1).concat(order.slice(0, me));
     $('opponents').innerHTML = others.map((id) => {
       const m = member(id) || { name: '?', wins: 0, connected: false };
       const p = g.players.find((x) => x.id === id);
       const cls = ['avatar', g.turnId === id ? 'turn' : '', p.checked ? 'checked' : '', m.connected ? '' : 'away'].join(' ');
-      return `<div class="opp">
+      return `<div class="opp${isHost() ? ' kickable' : ''}" data-id="${esc(id)}">
         <span class="score">★ ${m.wins}</span>
         <div class="${cls}">${esc(initials(m.name))}</div>
         ${p.checked ? '<span class="ck">CHECK</span>' : ''}
@@ -251,6 +280,7 @@
         <span class="count"><i></i>${p.count}</span>
       </div>`;
     }).join('');
+    if (isHost()) $('opponents').querySelectorAll('.opp').forEach((el) => { el.onclick = () => openKick(el.dataset.id); });
 
     // Table
     if (g.top.id !== lastTopId) {
@@ -279,6 +309,11 @@
     $('btnDraw').disabled = !mine;
     $('btnPlay').disabled = !mine || !selected || !g.playable.includes(selected);
     $('btnCheck').classList.toggle('hidden', !g.canCheck);
+    // Arrivé pendant la manche : il regarde, sans main ni boutons
+    const watching = !meP && st.phase === 'playing';
+    $('waitBanner').classList.toggle('hidden', !watching);
+    $('actions').classList.toggle('hidden', !meP);
+    $('hand').classList.toggle('hidden', !meP);
 
     // Main
     if (selected && !g.hand.some((c) => c.id === selected)) selected = null;
@@ -387,6 +422,9 @@
         case 'skip': toast(mine ? 'Tu sautes ton tour' : `${who} saute son tour`); break;
         case 'reshuffle': toast('La banque est remélangée'); break;
         case 'playerLeft': toast(`${esc(e.name)} a quitté la partie`, 'bad'); break;
+        case 'playerKicked': toast(`${esc(e.name)} a été exclu par l'hôte`, 'bad'); break;
+        case 'waiting': if (!mine) toast(`${esc(e.name)} est arrivé : il jouera à la prochaine manche`); break;
+        case 'react': showReaction(e.playerId, e.emoji, who); break;
         case 'blocked': toast(`Plus personne ne peut jouer : ${mine ? 'tu gagnes' : who + ' gagne'} avec le moins de cartes`, 'good'); break;
         case 'restart': selected = null; toast("L'hôte recommence la manche"); break;
         case 'notEnough': toast('Plus assez de joueurs : retour au salon', 'bad'); break;
@@ -395,6 +433,51 @@
       }
     }
   });
+
+  // ---------- Réactions ----------
+  const REACTIONS = ['😂', '🔥', '😤', '👏', '😱', '🙏'];
+  $('reactTray').innerHTML = REACTIONS.map((e) => `<button data-emoji="${e}" aria-label="Réaction ${e}">${e}</button>`).join('');
+  $('btnReact').onclick = () => $('reactTray').classList.toggle('hidden');
+  $('reactTray').querySelectorAll('button').forEach((b) => {
+    b.onclick = () => {
+      $('reactTray').classList.add('hidden');
+      socket.emit('react', { emoji: b.dataset.emoji }, (r) => r.error && toast(esc(r.error), 'bad'));
+    };
+  });
+  function showReaction(playerId, emoji, who) {
+    if (!REACTIONS.includes(emoji)) return;
+    const mine = st && playerId === st.you;
+    const target = mine ? $('meAvatar') : document.querySelector(`.opp[data-id="${CSS.escape(playerId)}"] .avatar`);
+    if (!target || $('game').classList.contains('hidden')) return toast(`${mine ? 'Toi' : who} ${emoji}`);
+    const r = target.getBoundingClientRect();
+    const el = document.createElement('div');
+    el.className = 'bubble';
+    el.textContent = emoji;
+    el.style.left = r.left + r.width / 2 + 'px';
+    el.style.top = r.top + 'px';
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 1800);
+  }
+
+  // ---------- Appli installable (PWA) ----------
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  let installPrompt = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installPrompt = e;
+    $('btnInstall').classList.remove('hidden');
+  });
+  $('btnInstall').onclick = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    await installPrompt.userChoice.catch(() => {});
+    installPrompt = null;
+    $('btnInstall').classList.add('hidden');
+  };
+  window.addEventListener('appinstalled', () => $('btnInstall').classList.add('hidden'));
+  // iPhone : pas d'invite automatique, on explique comment faire
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  if (/iphone|ipad|ipod/i.test(navigator.userAgent) && !standalone) $('iosHint').classList.remove('hidden');
 
   window.addEventListener('resize', () => { if (st && st.game && st.phase !== 'lobby') renderGame(); });
 })();

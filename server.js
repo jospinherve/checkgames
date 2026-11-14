@@ -121,6 +121,7 @@ function createRoom() {
     turnDeadline: 0,
     timer: null,
     matchWinnerId: null,
+    banned: new Set(), // jetons des joueurs exclus par l'hôte
     lastSeen: Date.now(),
   };
   rooms.set(room.code, room);
@@ -223,6 +224,40 @@ function isMatchOver(room) {
   return over;
 }
 
+// Retire un joueur d'une partie : départ volontaire, exclusion par l'hôte ou absence trop longue
+const LEAVE_LOG = { leave: 'a quitté', kick: 'a été exclu de', away: 'a quitté' };
+function removeMember(r, m, reason = 'leave') {
+  if (!r.members.includes(m)) return;
+  r.members = r.members.filter((x) => x !== m);
+  log(`${m.name} ${LEAVE_LOG[reason]} ${r.code}${reason === 'away' ? ' (absent trop longtemps)' : ''}`);
+  ensureHost(r);
+  if (r.members.length === 0) { clearTimeout(r.timer); rooms.delete(r.code); log(`partie ${r.code} fermée (vide)`); return; }
+  const type = reason === 'kick' ? 'playerKicked' : 'playerLeft';
+  if (r.phase === 'playing' && r.game && r.game.player(m.id)) {
+    r.game.removePlayer(m.id);
+    const ev = r.game.events.find((e) => e.type === 'playerLeft' && e.playerId === m.id);
+    if (ev) ev.type = type;
+    if (r.game.players.length < 2) {
+      // Plus assez de joueurs : retour au salon
+      flushEvents(r);
+      clearTimeout(r.timer);
+      r.phase = 'lobby'; r.game = null; r.turnDeadline = 0;
+      r.members.forEach((x) => { x.wins = 0; });
+      r.roundsPlayed = 0; r.matchWinnerId = null; r.tiebreak = false;
+      io.to('room:' + r.code).emit('events', [{ type: 'notEnough' }]);
+      broadcast(r);
+    } else {
+      afterAction(r);
+    }
+  } else {
+    // Dans le salon, ou joueur qui attendait la manche suivante : la manche en cours n'est pas touchée
+    io.to('room:' + r.code).emit('events', [{ type, playerId: m.id, name: m.name }]);
+    broadcast(r);
+  }
+}
+
+const REACTIONS = ['😂', '🔥', '😤', '👏', '😱', '🙏'];
+
 function startRound(room) {
   // Les absents depuis trop longtemps sont retirés entre deux manches
   room.members = room.members.filter((m) => {
@@ -254,6 +289,8 @@ io.on('connection', (socket) => {
   const on = (ev, fn) => socket.on(ev, (d, cb) => {
     if (typeof d === 'function') { cb = d; d = {}; }
     if (!hit('sock:' + socket.id, EVENTS_PER_SEC, 1000)) return tooFast(cb, 'Doucement !');
+    // Ce socket a été retiré de sa partie (exclu, ou absent trop longtemps) : on oublie la partie
+    if (room && member && !room.members.includes(member)) { socket.leave('room:' + room.code); room = null; member = null; }
     fn(d && typeof d === 'object' ? d : {}, cb);
   });
   // Refus temporaire : le client garde sa session et réessaie
@@ -272,30 +309,9 @@ io.on('connection', (socket) => {
   function leaveCurrent() {
     if (!room || !member) return;
     const r = room, m = member;
-    r.members = r.members.filter((x) => x !== m);
     socket.leave('room:' + r.code);
     room = null; member = null;
-    log(`${m.name} a quitté ${r.code}`);
-    ensureHost(r);
-    if (r.members.length === 0) { clearTimeout(r.timer); rooms.delete(r.code); log(`partie ${r.code} fermée (vide)`); return; }
-    if (r.phase === 'playing' && r.game) {
-      r.game.removePlayer(m.id);
-      if (r.game.players.length < 2) {
-        // Plus assez de joueurs : retour au salon
-        flushEvents(r);
-        clearTimeout(r.timer);
-        r.phase = 'lobby'; r.game = null; r.turnDeadline = 0;
-        r.members.forEach((x) => { x.wins = 0; });
-        r.roundsPlayed = 0; r.matchWinnerId = null; r.tiebreak = false;
-        io.to('room:' + r.code).emit('events', [{ type: 'notEnough' }]);
-        broadcast(r);
-      } else {
-        afterAction(r);
-      }
-    } else {
-      io.to('room:' + r.code).emit('events', [{ type: 'playerLeft', playerId: m.id, name: m.name }]);
-      broadcast(r);
-    }
+    removeMember(r, m, 'leave');
   }
 
   on('create', ({ name }, cb) => {
@@ -319,6 +335,7 @@ io.on('connection', (socket) => {
     if (f && Date.now() < f.reset && f.n >= 20) return tooFast(cb);
     const r = rooms.get(String(code || '').toUpperCase().trim());
     if (!r) { hit(failKey, 20, 60 * 1000); return fail(cb, 'Partie introuvable. Vérifie le code.'); }
+    if (token && r.banned.has(token)) return fail(cb, "L'hôte t'a exclu de cette partie.");
     const existing = token && r.members.find((m) => m.token === token);
     if (existing) {
       if (member !== existing) leaveCurrent();
@@ -328,7 +345,6 @@ io.on('connection', (socket) => {
       if (r.phase === 'playing') scheduleTurnIfAway(r);
       return broadcast(r);
     }
-    if (r.phase === 'playing') return fail(cb, 'Une manche est en cours. Réessaie à la fin de la manche.');
     if (r.members.length >= MAX_PLAYERS) return fail(cb, 'La partie est complète (5 joueurs).');
     leaveCurrent();
     if (!rooms.has(r.code)) return fail(cb, 'Partie introuvable. Vérifie le code.');
@@ -338,8 +354,10 @@ io.on('connection', (socket) => {
     const m = { id: crypto.randomUUID(), token: reuse ? token : crypto.randomUUID(), name: cleanName(name), wins: 0 };
     r.members.push(m);
     attach(r, m);
-    log(`${m.name} a rejoint ${r.code}`);
+    log(`${m.name} a rejoint ${r.code}${r.phase === 'playing' ? ' (attend la manche suivante)' : ''}`);
     reply(cb, { ok: true, code: r.code, token: m.token });
+    // Arrivé pendant une manche : il regarde et entre à la manche suivante
+    if (r.phase === 'playing') io.to('room:' + r.code).emit('events', [{ type: 'waiting', playerId: m.id, name: m.name }]);
     broadcast(r);
   });
 
@@ -406,6 +424,26 @@ io.on('connection', (socket) => {
     if (res.ok) { flushEvents(room); broadcast(room); }
   });
 
+  // L'hôte exclut un joueur (absent ou gênant). Il ne peut pas revenir avec la même session.
+  on('kick', ({ id }, cb) => {
+    if (!room || room.hostId !== member.id) return fail(cb, "Seul l'hôte peut exclure un joueur.");
+    const target = room.members.find((m) => m.id === id);
+    if (!target || target === member) return fail(cb, 'Joueur introuvable.');
+    room.banned.add(target.token);
+    const s = target.socketId && io.sockets.sockets.get(target.socketId);
+    if (s) { s.leave('room:' + room.code); s.emit('kicked'); }
+    removeMember(room, target, 'kick');
+    reply(cb, { ok: true });
+  });
+
+  // Réactions rapides (liste fixe d'emojis : pas de texte libre)
+  on('react', ({ emoji }, cb) => {
+    if (!room || !member || !REACTIONS.includes(emoji)) return fail(cb, 'Impossible.');
+    if (!hit('react:' + socket.id, 3, 3000)) return tooFast(cb, 'Doucement !');
+    io.to('room:' + room.code).emit('events', [{ type: 'react', playerId: member.id, emoji }]);
+    reply(cb, { ok: true });
+  });
+
   // Quitter la partie (dans le salon comme en pleine manche)
   on('leave', (_d, cb) => {
     leaveCurrent();
@@ -413,7 +451,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    if (!room || !member || member.socketId !== socket.id) return;
+    if (!room || !member || member.socketId !== socket.id || !room.members.includes(member)) return;
     member.connected = false;
     member.socketId = null;
     member.disconnectedAt = Date.now();

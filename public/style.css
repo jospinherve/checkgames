@@ -136,3 +136,25 @@ input:focus, select:focus { border-color: var(--accent); }
 .top-actions { display: flex; align-items: center; gap: 6px; }
 .quit-btn { font: inherit; font-size: 13px; font-weight: 600; color: var(--muted); background: var(--s1); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
 .btn.danger { background: var(--red); border-color: #f07a79; color: #fff; }
+
+/* ---------- Exclure un joueur ---------- */
+.plist .kick { margin-left: 8px; font: inherit; font-size: 13px; color: var(--muted); background: var(--s2); border: 1px solid var(--line); border-radius: 8px; width: 30px; height: 30px; cursor: pointer; }
+.plist .host + .kick { margin-left: 8px; }
+.plist li > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opp.kickable { cursor: pointer; }
+
+/* ---------- Spectateur ---------- */
+.wait-banner { margin: 10px 4px; padding: 10px 12px; border-radius: 12px; background: var(--s1); border: 1px dashed var(--accent); color: var(--accent-l); font-size: 14px; text-align: center; }
+
+/* ---------- Réactions ---------- */
+.react-tray { display: flex; justify-content: center; gap: 6px; padding: 6px 10px; margin: 0 12px; background: var(--s1); border: 1px solid var(--line); border-radius: 14px; }
+.react-tray button { font-size: 26px; background: none; border: 0; padding: 4px 6px; cursor: pointer; border-radius: 10px; }
+.react-tray button:active { background: var(--s2); }
+.bubble { position: fixed; z-index: 25; font-size: 34px; pointer-events: none; transform: translate(-50%, -60%); animation: bubble 1.8s ease-out forwards; }
+@keyframes bubble {
+  0% { opacity: 0; transform: translate(-50%, -20%) scale(.5); }
+  15% { opacity: 1; transform: translate(-50%, -70%) scale(1.15); }
+  70% { opacity: 1; transform: translate(-50%, -110%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -150%) scale(.9); }
+}
+@media (prefers-reduced-motion: reduce) { .bubble { animation-duration: 1.8s; animation-name: fade; } @keyframes fade { 80% { opacity: 1; } 100% { opacity: 0; } } }

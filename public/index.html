@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
   <meta name="theme-color" content="#1d1d1b" />
   <title>CheckGames — le jeu de cartes du Cameroun</title>
+  <meta name="description" content="Le jeu de cartes du Cameroun, chacun sur son téléphone." />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="CheckGames" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -24,6 +30,8 @@
       </label>
       <button id="btnJoin" class="btn">Rejoindre</button>
       <p id="homeErr" class="err"></p>
+      <button id="btnInstall" class="btn ghost hidden">📲 Installer l'appli sur mon téléphone</button>
+      <p id="iosHint" class="muted small hidden">Sur iPhone : touche <b>Partager</b> puis <b>Sur l'écran d'accueil</b> pour installer CheckGames.</p>
       <details class="rules">
         <summary>Les règles</summary>
         <ul>
@@ -81,11 +89,13 @@
       <span class="tag" id="gCode">----</span>
       <span class="muted small" id="gRound"></span>
       <div class="top-actions">
+        <button id="btnReact" class="icon-btn" aria-label="Réactions">😀</button>
         <button id="btnSound" class="icon-btn" aria-label="Son">🔊</button>
         <button id="btnRestart" class="quit-btn hidden" aria-label="Recommencer la manche">↻</button>
         <button id="btnQuit" class="quit-btn">Quitter</button>
       </div>
     </header>
+    <div id="reactTray" class="react-tray hidden"></div>
     <div class="opponents" id="opponents"></div>
     <div class="table">
       <div class="badges">
@@ -107,7 +117,8 @@
         <div class="me-info"><b id="meName"></b><span class="muted small" id="meScore"></span></div>
         <div class="me-timer" id="meTimer"></div>
       </div>
-      <div class="actions">
+      <p id="waitBanner" class="wait-banner hidden">Tu regardes la manche en cours. Tu joueras dès la prochaine !</p>
+      <div class="actions" id="actions">
         <button id="btnDraw" class="btn">Piocher</button>
         <button id="btnCheck" class="btn check hidden">Check !</button>
         <button id="btnPlay" class="btn primary">Jouer</button>
@@ -143,6 +154,16 @@
       <p class="muted">Les cartes sont redistribuées pour tout le monde. Les scores ne changent pas.</p>
       <button id="restartYes" class="btn primary">Recommencer</button>
       <button id="restartNo" class="btn ghost">Annuler</button>
+    </div>
+  </div>
+
+  <!-- Exclusion d'un joueur (hôte) -->
+  <div id="kickModal" class="overlay hidden">
+    <div class="sheet">
+      <h2 id="kickTitle">Exclure ce joueur ?</h2>
+      <p class="muted">Ses cartes retournent dans la banque. Il ne pourra pas revenir dans cette partie.</p>
+      <button id="kickYes" class="btn danger">Exclure</button>
+      <button id="kickNo" class="btn ghost">Annuler</button>
     </div>
   </div>
 
