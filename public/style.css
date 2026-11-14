@@ -158,3 +158,9 @@ input:focus, select:focus { border-color: var(--accent); }
   100% { opacity: 0; transform: translate(-50%, -150%) scale(.9); }
 }
 @media (prefers-reduced-motion: reduce) { .bubble { animation-duration: 1.8s; animation-name: fade; } @keyframes fade { 80% { opacity: 1; } 100% { opacity: 0; } } }
+
+/* « Check » armé : il sera annoncé avec la carte posée */
+.btn.check.announce { background: transparent; border: 2px dashed var(--green); color: var(--green); animation: none; }
+.btn.check.announce.armed { background: var(--green); border-style: solid; color: #062b16; }
+/* Zoom autorisé, mais pas de double-tap qui zoome par accident sur les boutons et les cartes */
+button, .card, .pile { touch-action: manipulation; }

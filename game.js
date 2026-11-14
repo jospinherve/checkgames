@@ -90,6 +90,14 @@ class Game {
 
   emit(e) { this.events.push(e); }
 
+  // Banque vide et rien à remélanger (la défausse ne contient que la carte du dessus)
+  nothingToDraw() { return this.deck.length === 0 && this.discard.length <= 1; }
+
+  // Banque vide, pas de pénalité et une carte jouable : on doit jouer (piocher ne ferait que passer)
+  mustPlay(playerId) {
+    return this.penalty === 0 && this.nothingToDraw() && this.playableIds(playerId).length > 0;
+  }
+
   // Celui qui a oublié de dire « check » pioche quand le joueur suivant agit
   resolveForgottenChecks(actorId) {
     for (const p of this.players) {
@@ -120,7 +128,8 @@ class Game {
 
   nextIndex(step = 1) { return (this.turn + step) % this.players.length; }
 
-  play(playerId, cardId, chosenSuit) {
+  // announce : le joueur dit « Check ! » en posant son avant-dernière carte
+  play(playerId, cardId, chosenSuit, announce = false) {
     if (this.winnerId) return { error: 'La manche est terminée.' };
     const p = this.current;
     if (p.id !== playerId) return { error: "Ce n'est pas ton tour." };
@@ -144,7 +153,10 @@ class Game {
       this.emit({ type: 'roundWin', playerId: p.id });
       return { ok: true };
     }
-    if (p.hand.length === 1) p.checkPending = true;
+    if (p.hand.length === 1) {
+      if (announce) { p.checked = true; p.checkPending = false; this.emit({ type: 'check', playerId: p.id }); }
+      else p.checkPending = true;
+    }
 
     let step = 1;
     if (card.rank === 'A') {
@@ -159,6 +171,7 @@ class Game {
     if (this.winnerId) return { error: 'La manche est terminée.' };
     const p = this.current;
     if (p.id !== playerId) return { error: "Ce n'est pas ton tour." };
+    if (this.mustPlay(playerId)) return { error: 'La banque est vide : tu dois poser une carte.' };
     this.resolveForgottenChecks(p.id);
     const n = this.penalty > 0 ? this.penalty : 1;
     const wasPenalty = this.penalty > 0;
@@ -176,6 +189,21 @@ class Game {
     }
     this.turn = this.nextIndex(1);
     return { ok: true };
+  }
+
+  // Chrono écoulé (ou joueur absent) : on pioche, sauf si la banque est vide et qu'une carte passe
+  autoMove(playerId) {
+    if (!this.mustPlay(playerId)) return this.draw(playerId);
+    const p = this.player(playerId);
+    const card = p.hand.find((c) => this.playableIds(playerId).includes(c.id));
+    let suit = null;
+    if (card.rank === 'J') {
+      // Le valet demande la couleur la plus présente dans le reste de la main
+      const count = {};
+      for (const c of p.hand) if (c !== card && c.suit) count[c.suit] = (count[c.suit] || 0) + 1;
+      suit = Object.keys(count).sort((a, b) => count[b] - count[a])[0] || card.suit;
+    }
+    return this.play(playerId, card.id, suit);
   }
 
   check(playerId) {
@@ -218,6 +246,7 @@ class Game {
       hand: me ? me.hand : [],
       playable: me ? this.playableIds(forId) : [],
       canCheck: !!me && me.hand.length === 1 && me.checkPending,
+      mustPlay: !!me && this.current.id === forId && !this.winnerId && this.mustPlay(forId),
       winnerId: this.winnerId,
     };
   }

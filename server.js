@@ -96,6 +96,17 @@ function cleanName(n) { return String(n || '').replace(/[\u0000-\u001f\u007f-\u0
 
 function log(msg) { console.log(msg); }
 
+// Deux joueurs ne portent jamais le même nom dans une partie : « Paul », « Paul 2 »…
+function uniqueName(r, name) {
+  const taken = new Set(r.members.map((m) => m.name.toLowerCase()));
+  if (!taken.has(name.toLowerCase())) return name;
+  for (let i = 2; ; i++) {
+    const suffix = ' ' + i;
+    const candidate = name.slice(0, 14 - suffix.length).trimEnd() + suffix;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
 function sanitizeSettings(s, prev) {
   const out = { ...prev };
   if (s && Number.isInteger(+s.handSize)) out.handSize = Math.min(MAX_HAND, Math.max(MIN_HAND, +s.handSize));
@@ -184,7 +195,7 @@ function scheduleTurn(room) {
   const evCount = g.events.length;
   room.timer = setTimeout(() => {
     if (room.game !== g || g.winnerId || g.current.id !== turnId) return;
-    g.draw(turnId);
+    g.autoMove(turnId);
     g.events.splice(evCount, 0, { type: 'timeout', playerId: turnId });
     afterAction(room);
   }, ms);
@@ -224,6 +235,16 @@ function isMatchOver(room) {
   return over;
 }
 
+// Plus assez de joueurs : retour au salon (scores remis à zéro)
+function backToLobby(r) {
+  clearTimeout(r.timer);
+  r.phase = 'lobby'; r.game = null; r.turnDeadline = 0;
+  r.members.forEach((x) => { x.wins = 0; });
+  r.roundsPlayed = 0; r.matchWinnerId = null; r.tiebreak = false;
+  io.to('room:' + r.code).emit('events', [{ type: 'notEnough' }]);
+  broadcast(r);
+}
+
 // Retire un joueur d'une partie : départ volontaire, exclusion par l'hôte ou absence trop longue
 const LEAVE_LOG = { leave: 'a quitté', kick: 'a été exclu de', away: 'a quitté' };
 function removeMember(r, m, reason = 'leave') {
@@ -238,21 +259,17 @@ function removeMember(r, m, reason = 'leave') {
     const ev = r.game.events.find((e) => e.type === 'playerLeft' && e.playerId === m.id);
     if (ev) ev.type = type;
     if (r.game.players.length < 2) {
-      // Plus assez de joueurs : retour au salon
       flushEvents(r);
-      clearTimeout(r.timer);
-      r.phase = 'lobby'; r.game = null; r.turnDeadline = 0;
-      r.members.forEach((x) => { x.wins = 0; });
-      r.roundsPlayed = 0; r.matchWinnerId = null; r.tiebreak = false;
-      io.to('room:' + r.code).emit('events', [{ type: 'notEnough' }]);
-      broadcast(r);
+      backToLobby(r);
     } else {
       afterAction(r);
     }
   } else {
     // Dans le salon, ou joueur qui attendait la manche suivante : la manche en cours n'est pas touchée
     io.to('room:' + r.code).emit('events', [{ type, playerId: m.id, name: m.name }]);
-    broadcast(r);
+    // Fin de manche ou de match avec un seul joueur : il ne pourrait plus rien lancer
+    if ((r.phase === 'roundEnd' || r.phase === 'matchEnd') && r.members.length < 2) backToLobby(r);
+    else broadcast(r);
   }
 }
 
@@ -266,7 +283,10 @@ function startRound(room) {
     return keep;
   });
   ensureHost(room);
-  if (room.members.length < 2) return 'Il faut au moins 2 joueurs.';
+  if (room.members.length < 2) {
+    if (room.phase === 'roundEnd' || room.phase === 'matchEnd') backToLobby(room);
+    return 'Il faut au moins 2 joueurs.';
+  }
   const starterId = room.members.some((m) => m.id === room.lastWinnerId) ? room.lastWinnerId : null;
   room.game = new Game(room.members.map((m) => ({ id: m.id, name: m.name })), room.settings, { starterId });
   room.phase = 'playing';
@@ -351,7 +371,7 @@ io.on('connection', (socket) => {
     // Jeton expiré (place libérée après une longue absence) : on le réutilise pour le nouveau joueur,
     // ainsi le navigateur qui le renvoie à chaque actualisation retombe toujours sur le même joueur.
     const reuse = typeof token === 'string' && UUID_RE.test(token) && ![...rooms.values()].some((x) => x.members.some((mm) => mm.token === token));
-    const m = { id: crypto.randomUUID(), token: reuse ? token : crypto.randomUUID(), name: cleanName(name), wins: 0 };
+    const m = { id: crypto.randomUUID(), token: reuse ? token : crypto.randomUUID(), name: uniqueName(r, cleanName(name)), wins: 0 };
     r.members.push(m);
     attach(r, m);
     log(`${m.name} a rejoint ${r.code}${r.phase === 'playing' ? ' (attend la manche suivante)' : ''}`);
@@ -403,9 +423,10 @@ io.on('connection', (socket) => {
     broadcast(room);
   });
 
-  on('play', ({ cardId, suit }, cb) => {
+  on('play', (d, cb) => {
+    const { cardId, suit } = d;
     if (!room || !room.game || room.phase !== 'playing') return fail(cb, 'Pas de manche en cours.');
-    const res = room.game.play(member.id, cardId, SUITS.includes(suit) ? suit : null);
+    const res = room.game.play(member.id, cardId, SUITS.includes(suit) ? suit : null, d.check === true);
     reply(cb, res);
     if (res.ok) afterAction(room);
   });
@@ -465,7 +486,8 @@ io.on('connection', (socket) => {
         log(`${m.name} a quitté ${r.code} (absent trop longtemps)`);
         r.members = r.members.filter((x) => x !== m);
         ensureHost(r);
-        broadcast(r);
+        if ((r.phase === 'roundEnd' || r.phase === 'matchEnd') && r.members.length === 1) backToLobby(r);
+        else broadcast(r);
       }
     }, RECONNECT_MS + 50);
   });

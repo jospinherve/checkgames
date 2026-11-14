@@ -221,12 +221,19 @@
 
   function doDraw() {
     if (!myTurn()) return toast("Ce n'est pas ton tour.");
+    if (st.game.mustPlay) return toast('La banque est vide : tu dois poser une carte.', 'bad');
     selected = null;
     socket.emit('draw', {}, (r) => r.error && toast(r.error, 'bad'));
   }
   $('btnDraw').onclick = doDraw;
   $('drawPile').onclick = doDraw;
-  $('btnCheck').onclick = () => socket.emit('check', {}, (r) => r.error && toast(r.error, 'bad'));
+  // « Check » : soit annoncé en posant l'avant-dernière carte (bouton armé), soit juste après
+  let checkArmed = false;
+  $('btnCheck').onclick = () => {
+    if (st.game.canCheck) return socket.emit('check', {}, (r) => r.error && toast(r.error, 'bad'));
+    checkArmed = !checkArmed;
+    renderGame();
+  };
   $('btnPlay').onclick = () => playSelected();
 
   function playSelected() {
@@ -239,8 +246,9 @@
     send(card.id);
   }
   function send(cardId, suit) {
-    socket.emit('play', { cardId, suit }, (r) => { if (r.error) toast(r.error, 'bad'); });
+    socket.emit('play', { cardId, suit, check: checkArmed }, (r) => { if (r.error) toast(r.error, 'bad'); });
     selected = null;
+    checkArmed = false;
   }
 
   // Choix de couleur pour le J
@@ -295,7 +303,7 @@
     if (g.commanded) $('bCommand').innerHTML = `${Cards.suitIcon(g.commanded)} ${Cards.SUIT_NAMES[g.commanded]} demandé`;
 
     const mine = myTurn();
-    $('drawPile').classList.toggle('can-draw', mine);
+    $('drawPile').classList.toggle('can-draw', mine && !g.mustPlay);
     $('status').classList.toggle('mine', mine);
 
     // Moi
@@ -305,10 +313,16 @@
     $('meAvatar').className = ['avatar', mine ? 'turn' : '', meP && meP.checked ? 'checked' : ''].join(' ');
     $('meName').textContent = meM.name;
     $('meScore').textContent = `★ ${meM.wins} victoire${meM.wins > 1 ? 's' : ''}` + (meP && meP.checked ? ' · Check annoncé' : '');
-    $('btnDraw').textContent = g.penalty && mine ? `Piocher ${g.penalty}` : 'Piocher';
-    $('btnDraw').disabled = !mine;
+    $('btnDraw').textContent = g.mustPlay ? 'Banque vide' : g.penalty && mine ? `Piocher ${g.penalty}` : 'Piocher';
+    $('btnDraw').disabled = !mine || g.mustPlay;
     $('btnPlay').disabled = !mine || !selected || !g.playable.includes(selected);
-    $('btnCheck').classList.toggle('hidden', !g.canCheck);
+    // Avec 2 cartes, on peut armer « Check » avant de poser l'avant-dernière
+    const canAnnounce = mine && g.hand.length === 2;
+    if (!canAnnounce) checkArmed = false;
+    $('btnCheck').classList.toggle('hidden', !(g.canCheck || canAnnounce));
+    $('btnCheck').classList.toggle('armed', checkArmed);
+    $('btnCheck').classList.toggle('announce', canAnnounce && !g.canCheck);
+    $('btnCheck').textContent = checkArmed ? '✓ Check' : 'Check !';
     // Arrivé pendant la manche : il regarde, sans main ni boutons
     const watching = !meP && st.phase === 'playing';
     $('waitBanner').classList.toggle('hidden', !watching);

@@ -176,4 +176,61 @@ t('2000 manches aléatoires : 54 cartes toujours présentes, aucune carte en dou
   }
 });
 
+t('banque vide : on doit poser une carte jouable, pas de fausse manche bloquée', () => {
+  const g = setup([['5H', '9C'], ['6S', '2S'], ['8H', 'KD']], '3H', { deck: [] });
+  assert.match(g.draw('p0').error, /banque est vide/);
+  assert.strictEqual(g.current.id, 'p0');
+  assert(g.publicState('p0').mustPlay);
+  // P1 ne peut rien jouer : il passe
+  g.play('p0', '5H');
+  assert(!g.mustPlay('p1'));
+  assert(g.draw('p1').ok);
+  assert(!g.winnerId, 'P2 peut encore jouer : la manche continue');
+});
+
+t('banque vide sous pénalité : on peut refuser de contrer', () => {
+  const g = setup([['7H', '2C'], ['7S', '4D']], '9H', { deck: [] });
+  g.play('p0', '7H');
+  assert(!g.mustPlay('p1'));
+  assert(g.draw('p1').ok);
+});
+
+t('chrono écoulé : pioche, ou pose une carte si la banque est vide', () => {
+  let g = setup([['5H', '9C'], ['6S']], '3H');
+  g.autoMove('p0');
+  assert.strictEqual(g.players[0].hand.length, 3);
+  g = setup([['9C', '5H'], ['6S']], '3H', { deck: [] });
+  g.autoMove('p0');
+  assert.strictEqual(g.top.id, '5H');
+  // Valet joué automatiquement : il demande la couleur la plus présente dans la main
+  g = setup([['JD', '2C', '4C', '9S'], ['6S']], '3H', { deck: [] });
+  g.autoMove('p0');
+  assert.strictEqual(g.top.id, 'JD');
+  assert.strictEqual(g.commanded, 'C');
+});
+
+t('check annoncé en posant l\'avant-dernière carte : pas de pénalité', () => {
+  const g = setup([['5H', '9H'], ['6H', '2S']], '3H');
+  g.play('p0', '5H', null, true);
+  assert(g.players[0].checked);
+  assert(g.events.some((e) => e.type === 'check' && e.playerId === 'p0'));
+  g.play('p1', '6H');
+  assert.strictEqual(g.players[0].hand.length, 1, 'aucune carte de pénalité');
+  assert(!g.events.some((e) => e.type === 'forgotCheck'));
+});
+
+t('annonce ignorée s\'il reste plus d\'une carte', () => {
+  const g = setup([['5H', '9H', 'KC'], ['6H']], '3H');
+  g.play('p0', '5H', null, true);
+  assert(!g.players[0].checked);
+});
+
+t('le joueur qui doit subir la pénalité quitte : la pénalité est annulée', () => {
+  const g = setup([['7H', '2C'], ['3S', '4S'], ['5D', '6D']], '9H');
+  g.play('p0', '7H');
+  g.removePlayer('p1');
+  assert.strictEqual(g.penalty, 0);
+  assert.strictEqual(g.current.id, 'p2');
+});
+
 console.log(`\n${n} tests réussis`);

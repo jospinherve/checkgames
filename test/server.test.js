@@ -77,8 +77,9 @@ t('codes au hasard : bloqué après 20 codes inexistants par IP', async () => {
 
 t('rafale de messages : refusés au-delà de 20 par seconde', async () => {
   const s = await client();
-  const res = await Promise.all(Array.from({ length: 40 }, () => ask(s, 'draw')));
-  assert.strictEqual(res.filter((r) => r.retry).length, 20);
+  const res = await Promise.all(Array.from({ length: 100 }, () => ask(s, 'draw')));
+  // La rafale dure moins d'une seconde : elle touche au plus 2 fenêtres, donc au plus 40 messages acceptés
+  assert.ok(res.filter((r) => !r.retry).length <= 40);
   s.close();
 });
 
@@ -207,6 +208,48 @@ t('réactions : seulement les emojis prévus, et pas trop vite', async () => {
   await ask(p1, 'react', { emoji: '😂' });
   assert.ok((await ask(p1, 'react', { emoji: '😂' })).retry, '4e réaction en 3 s refusée');
   [host, p1].forEach((c) => c.close());
+});
+
+// ---------- Corrections de l'inspection ----------
+
+t("seul en fin de manche : retour automatique au salon", async () => {
+  const { host, others, code } = await startedRoom(2);
+  const r = rooms.get(code);
+  r.game.winnerId = r.members[0].id; r.phase = 'roundEnd'; r.roundsPlayed = 1;
+  await ask(others[0], 'leave');
+  await wait(50);
+  assert.strictEqual(r.phase, 'lobby');
+  assert.strictEqual(host.state.phase, 'lobby');
+  [host, ...others].forEach((c) => c.close());
+});
+
+t('deux joueurs avec le même nom : le second est numéroté', async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'Paul' });
+  const b = await client(), c = await client(), d = await client();
+  await ask(b, 'join', { code, name: 'paul' });
+  await ask(c, 'join', { code, name: 'Paul' });
+  await ask(d, 'join', { code, name: 'Abcdefghijklmn' });
+  const e = await client();
+  await ask(e, 'join', { code, name: 'Abcdefghijklmn' });
+  assert.deepStrictEqual(names(code), ['Paul', 'paul 2', 'Paul 3', 'Abcdefghijklmn', 'Abcdefghijkl 2']);
+  [host, b, c, d, e].forEach((x) => x.close());
+});
+
+t("« Check » envoyé avec la carte : le serveur l'enregistre", async () => {
+  const { host, others, code } = await startedRoom(2);
+  const g = rooms.get(code).game;
+  const cur = g.current;
+  const sock = [host, ...others].find((x) => x.state.you === cur.id);
+  // Main truquée : 2 cartes, la première passe sur la carte du dessus
+  const top = g.top;
+  cur.hand = [{ id: 'X1', rank: '5', suit: top.suit || 'H' }, { id: 'X2', rank: 'K', suit: 'S' }];
+  g.penalty = 0; g.commanded = null;
+  if (top.rank === 'JOKER') cur.hand[0].suit = top.color === 'red' ? 'H' : 'S';
+  const r = await ask(sock, 'play', { cardId: 'X1', check: true });
+  assert.ok(r.ok, r.error);
+  assert.ok(cur.checked);
+  [host, ...others].forEach((x) => x.close());
 });
 
 // ---------- Appli installable ----------

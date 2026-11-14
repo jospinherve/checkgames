@@ -50,10 +50,12 @@ async function runMatch(nPlayers, port, opts = {}) {
       if (g.turnId !== s.you) continue;
       if (opts.idle && i === 1) continue; // ce joueur laisse filer son chrono
       let res;
-      if (g.playable.length && Math.random() < 0.85) {
+      // Banque vide avec une carte jouable : la règle oblige à jouer
+      if (g.playable.length && (g.mustPlay || Math.random() < 0.85)) {
         const id = g.playable[Math.floor(Math.random() * g.playable.length)];
-        res = await clients[i].emitWithAck('play', { cardId: id, suit: SUITS[Math.floor(Math.random() * 4)] });
-        if (Math.random() < 0.85) await clients[i].emitWithAck('check'); // annonce juste après avoir joué
+        const announce = g.hand.length === 2 && Math.random() < 0.5; // « Check » annoncé avec la carte
+        res = await clients[i].emitWithAck('play', { cardId: id, suit: SUITS[Math.floor(Math.random() * 4)], check: announce });
+        if (Math.random() < 0.85) await clients[i].emitWithAck('check'); // ou juste après avoir joué
       } else {
         res = await clients[i].emitWithAck('draw');
       }
