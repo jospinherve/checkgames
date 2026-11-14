@@ -9,10 +9,18 @@
   let lastTopId = null;
   let lastTurnId = null;
   let prevPhase = null;
-  let soundOn = localStorage.getItem('sound') !== 'off';
-  const session = () => { try { return JSON.parse(localStorage.getItem('session') || 'null'); } catch { return null; } };
-  const saveSession = (s) => localStorage.setItem('session', JSON.stringify(s));
-  const clearSession = () => localStorage.removeItem('session');
+  // Stockage tolérant : certains navigateurs (navigation privée, navigateurs intégrés aux applis)
+  // refusent localStorage. On garde alors les valeurs en mémoire pour que le jeu fonctionne quand même.
+  const memStore = {};
+  const store = {
+    get(k) { try { const v = localStorage.getItem(k); if (v !== null) return v; } catch {} return k in memStore ? memStore[k] : null; },
+    set(k, v) { memStore[k] = String(v); try { localStorage.setItem(k, v); } catch {} },
+    del(k) { delete memStore[k]; try { localStorage.removeItem(k); } catch {} },
+  };
+  let soundOn = store.get('sound') !== 'off';
+  const session = () => { try { return JSON.parse(store.get('session') || 'null'); } catch { return null; } };
+  const saveSession = (s) => store.set('session', JSON.stringify(s));
+  const clearSession = () => store.del('session');
 
   // ---------- Sons ----------
   let actx = null;
@@ -72,14 +80,14 @@
     const c = id === 'JKB' ? { id, rank: 'JOKER', color: 'black' } : { id, rank: id[0], suit: id[1] };
     return `<div class="card">${Cards.svg(c)}</div>`;
   }).join('');
-  $('name').value = localStorage.getItem('name') || '';
+  $('name').value = store.get('name') || '';
   const urlCode = new URLSearchParams(location.search).get('c');
   if (urlCode) $('code').value = urlCode.toUpperCase();
 
   function getName() {
     const n = $('name').value.trim();
     if (!n) { $('homeErr').textContent = 'Entre ton pseudo.'; $('name').focus(); return null; }
-    localStorage.setItem('name', n);
+    store.set('name', n);
     return n;
   }
   $('name').addEventListener('input', () => { $('homeErr').textContent = ''; });
@@ -106,8 +114,11 @@
   socket.on('connect', () => {
     const s = session();
     if (s) {
-      socket.emit('join', { code: s.code, token: s.token, name: localStorage.getItem('name') }, (res) => {
-        if (res.error) { clearSession(); show('home'); }
+      socket.emit('join', { code: s.code, token: s.token, name: store.get('name') }, (res) => {
+        if (res.error) { clearSession(); show('home'); return; }
+        // Le serveur peut nous avoir recréé comme nouveau joueur (ancienne place expirée) :
+        // on garde toujours le jeton renvoyé, sinon chaque actualisation ajouterait un doublon.
+        saveSession({ code: res.code, token: res.token });
       });
     }
   });
@@ -173,7 +184,7 @@
   $('backCard').innerHTML = Cards.back();
   $('btnSound').textContent = soundOn ? '🔊' : '🔇';
   $('btnSound').onclick = () => {
-    soundOn = !soundOn; localStorage.setItem('sound', soundOn ? 'on' : 'off');
+    soundOn = !soundOn; store.set('sound', soundOn ? 'on' : 'off');
     $('btnSound').textContent = soundOn ? '🔊' : '🔇';
   };
 

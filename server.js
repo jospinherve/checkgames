@@ -8,6 +8,7 @@ const { Game, SUITS, MAX_PLAYERS, MIN_HAND, MAX_HAND } = require('./game');
 
 const TURN_MS = Number(process.env.TURN_MS || 30000);
 const RECONNECT_MS = Number(process.env.RECONNECT_MS || 60000);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_ROOMS = Number(process.env.MAX_ROOMS || 2000);
 
 const app = express();
@@ -239,7 +240,10 @@ io.on('connection', (socket) => {
     if (r.members.length >= MAX_PLAYERS) return fail(cb, 'La partie est complète (5 joueurs).');
     leaveCurrent();
     if (!rooms.has(r.code)) return fail(cb, 'Partie introuvable. Vérifie le code.');
-    const m = { id: crypto.randomUUID(), token: crypto.randomUUID(), name: cleanName(name), wins: 0 };
+    // Jeton expiré (place libérée après une longue absence) : on le réutilise pour le nouveau joueur,
+    // ainsi le navigateur qui le renvoie à chaque actualisation retombe toujours sur le même joueur.
+    const reuse = typeof token === 'string' && UUID_RE.test(token) && ![...rooms.values()].some((x) => x.members.some((mm) => mm.token === token));
+    const m = { id: crypto.randomUUID(), token: reuse ? token : crypto.randomUUID(), name: cleanName(name), wins: 0 };
     r.members.push(m);
     attach(r, m);
     reply(cb, { ok: true, code: r.code, token: m.token });
