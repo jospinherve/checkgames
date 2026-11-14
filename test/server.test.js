@@ -355,30 +355,27 @@ t('manifest et service worker servis', async () => {
 
 // ---------- Places au hasard ----------
 
-t('chaque nouveau match tire les places au hasard (les manches suivantes gardent l\'ordre)', async () => {
+t('chaque manche tire les places au hasard, et le gagnant commence', async () => {
   const host = await client();
   const { code } = await ask(host, 'create', { name: 'H' });
   for (let i = 0; i < 3; i++) await ask(host, 'addBot', { level: 'easy' });
   const r = rooms.get(code);
+  await ask(host, 'start');
   const orders = new Set();
   for (let k = 0; k < 15; k++) {
-    await ask(host, 'start');
     const order = r.game.players.map((p) => p.id).join();
     assert.strictEqual(order, r.members.map((m) => m.id).join(), 'ordre de jeu = ordre des places');
     orders.add(order);
-    // fin de match forcée, puis revanche
-    clearTimeout(r.timer); r.phase = 'matchEnd'; r.game = null;
+    // fin de manche forcée, puis manche suivante du même match
+    const winner = r.game.players[k % 4].id;
+    r.game.winnerId = winner; r.lastWinnerId = winner; clearTimeout(r.timer); r.phase = 'roundEnd';
+    await ask(host, 'start');
+    assert.strictEqual(r.game.current.id, winner, 'le gagnant de la manche précédente commence');
   }
-  assert.ok(orders.size > 1, 'les places changent d\'un match à l\'autre');
-  assert.deepStrictEqual(names(code).sort(), r.members.map((m) => m.name).sort());
-  // Manche suivante du même match : même ordre
-  await ask(host, 'start');
-  const before = r.members.map((m) => m.id).join();
-  r.game.winnerId = r.game.players[0].id; clearTimeout(r.timer); r.phase = 'roundEnd';
-  await ask(host, 'start');
-  assert.strictEqual(r.members.map((m) => m.id).join(), before);
+  assert.ok(orders.size > 1, 'les places changent d\'une manche à l\'autre');
+  assert.deepStrictEqual(names(code).sort(), ['H', ...r.members.filter((m) => m.bot).map((m) => m.name)].sort());
   await wait(30);
-  assert.ok(host.events.some((e) => e.type === 'seats'));
+  assert.ok(host.events.some((e) => e.type === 'roundStart' && e.shuffled));
   host.close();
 });
 

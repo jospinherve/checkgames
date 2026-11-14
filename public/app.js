@@ -613,9 +613,8 @@
         case 'react': showReaction(e.playerId, e.emoji, who); break;
         case 'blocked': toast(`Plus personne ne peut jouer : ${mine ? 'tu gagnes' : who + ' gagne'} avec le moins de cartes`, 'good'); break;
         case 'restart': selected = null; prevHand = new Set(); toast("L'hôte recommence la manche"); break;
-        case 'seats': toast('🔀 Places tirées au hasard pour ce match'); break;
         case 'notEnough': toast('Plus assez de joueurs : retour au salon', 'bad'); break;
-        case 'roundStart': lastTopId = null; lastTurnId = null; prevHand = new Set(); toast('Nouvelle manche !', 'good'); break;
+        case 'roundStart': lastTopId = null; lastTurnId = null; prevHand = new Set(); toast(e.shuffled ? 'Nouvelle manche ! 🔀 Places mélangées' : 'Nouvelle manche !', 'good'); break;
         default: break;
       }
     }

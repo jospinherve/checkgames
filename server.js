@@ -312,14 +312,13 @@ const REACTIONS = ['😂', '🔥', '😤', '👏', '😱', '🙏'];
 // Phrases rapides : liste fixe, pas de texte libre (pas d'insultes possibles)
 const PHRASES = ['Joue vite !', 'Bien joué !', "C'est chaud !", 'Tu vas voir…', 'On dit quoi ?', 'Revanche ?'];
 
-// Nouveau match : les places autour de la table (l'ordre de jeu) sont tirées au hasard
+// À chaque manche, les places autour de la table (l'ordre de jeu) sont tirées au hasard
 function shuffleSeats(room) {
   const m = room.members;
   for (let i = m.length - 1; i > 0; i--) {
     const j = crypto.randomInt(i + 1);
     [m[i], m[j]] = [m[j], m[i]];
   }
-  if (m.length > 2) io.to('room:' + room.code).emit('events', [{ type: 'seats' }]);
 }
 
 function startRound(room) {
@@ -334,10 +333,12 @@ function startRound(room) {
     if (room.phase === 'roundEnd' || room.phase === 'matchEnd') backToLobby(room);
     return 'Il faut au moins 2 joueurs.';
   }
+  shuffleSeats(room);
   const starterId = room.members.some((m) => m.id === room.lastWinnerId) ? room.lastWinnerId : null;
   room.game = new Game(room.members.map((m) => ({ id: m.id, name: m.name })), room.settings, { starterId });
   room.phase = 'playing';
-  room.game.emit({ type: 'roundStart' });
+  // À 2 joueurs, mélanger les places ne change rien : pas besoin de l'annoncer
+  room.game.emit({ type: 'roundStart', shuffled: room.members.length > 2 });
   flushEvents(room);
   scheduleTurn(room);
   broadcast(room);
@@ -480,7 +481,6 @@ io.on('connection', (socket) => {
     if (room.phase === 'matchEnd' || room.phase === 'lobby') {
       room.members.forEach((m) => { m.wins = 0; });
       room.roundsPlayed = 0; room.tiebreak = false; room.matchWinnerId = null; room.lastWinnerId = null;
-      shuffleSeats(room);
     }
     const err = startRound(room);
     reply(cb, err ? { error: err } : { ok: true });

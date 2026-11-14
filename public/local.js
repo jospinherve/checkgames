@@ -96,10 +96,13 @@
 
     function startRound() {
       if (room.members.length < 2) return 'Ajoute au moins un robot.';
-      const starterId = room.members.some((m) => m.id === room.lastWinnerId) ? room.lastWinnerId : null;
-      room.game = new Game(room.members.map((m) => ({ id: m.id, name: m.name })), room.settings, { starterId });
+      // À chaque manche, places tirées au hasard
+      const m = room.members;
+      for (let i = m.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [m[i], m[j]] = [m[j], m[i]]; }
+      const starterId = room.members.some((x) => x.id === room.lastWinnerId) ? room.lastWinnerId : null;
+      room.game = new Game(room.members.map((x) => ({ id: x.id, name: x.name })), room.settings, { starterId });
       room.phase = 'playing';
-      room.game.emit({ type: 'roundStart' });
+      room.game.emit({ type: 'roundStart', shuffled: m.length > 2 });
       flush();
       scheduleTurn();
       broadcast();
@@ -160,13 +163,7 @@
       },
       start() {
         if (room.phase === 'playing') return { error: 'Déjà en cours.' };
-        if (room.phase === 'matchEnd' || room.phase === 'lobby') {
-          resetScores();
-          // Nouveau match : places tirées au hasard
-          const m = room.members;
-          for (let i = m.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [m[i], m[j]] = [m[j], m[i]]; }
-          if (m.length > 2) events([{ type: 'seats' }]);
-        }
+        if (room.phase === 'matchEnd' || room.phase === 'lobby') resetScores();
         const err = startRound();
         return err ? { error: err } : { ok: true };
       },
