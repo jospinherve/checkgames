@@ -1,4 +1,6 @@
 // Moteur de règles — jeu de cartes camerounais
+// Utilisé par le serveur (Node) et par le navigateur pour le mode hors-ligne.
+(function () {
 'use strict';
 
 const SUITS = ['H', 'D', 'C', 'S'];
@@ -175,9 +177,11 @@ class Game {
     this.resolveForgottenChecks(p.id);
     const n = this.penalty > 0 ? this.penalty : 1;
     const wasPenalty = this.penalty > 0;
+    // Couleur demandée sur la table au moment de piocher (information visible de tous)
+    const need = wasPenalty ? null : this.commanded || this.top.suit || null;
     this.penalty = 0;
     const got = this.drawCards(p, n);
-    this.emit({ type: 'draw', playerId: p.id, count: got, penalty: wasPenalty });
+    this.emit({ type: 'draw', playerId: p.id, count: got, penalty: wasPenalty, need });
     this.emptyPasses = got === 0 ? this.emptyPasses + 1 : 0;
     if (this.emptyPasses >= this.players.length) {
       // Manche bloquée (plus de cartes à piocher, personne ne peut jouer) : le moins de cartes gagne
@@ -252,4 +256,7 @@ class Game {
   }
 }
 
-module.exports = { Game, SUITS, SUIT_NAMES, MAX_PLAYERS, MIN_HAND, MAX_HAND, colorOf, newDeck };
+const api = { Game, SUITS, SUIT_NAMES, MAX_PLAYERS, MIN_HAND, MAX_HAND, colorOf, newDeck };
+if (typeof module === 'object' && module.exports) module.exports = api;
+else self.CheckRules = api;
+})();

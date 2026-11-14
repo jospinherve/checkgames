@@ -1,7 +1,19 @@
 (function () {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const socket = io({ transports: ['websocket', 'polling'] });
+  // Sans le script socket.io (premier lancement sans réseau), le mode hors-ligne reste disponible
+  const socket = window.io ? io({ transports: ['websocket', 'polling'] }) : { connected: false, on() {}, emit() {} };
+  // Tous les messages du jeu passent par net : vers le serveur, ou vers la partie hors-ligne contre les robots
+  const handlers = {};
+  const net = {
+    local: null, // partie hors-ligne en cours
+    emit(ev, data, cb) { if (this.local) this.local.emit(ev, data, cb); else socket.emit(ev, data, cb); },
+  };
+  function onNet(ev, fn) {
+    handlers[ev] = fn;
+    socket.on(ev, (d) => { if (!net.local) fn(d); });
+  }
+  const deliverLocal = (ev, d) => { if (net.local && handlers[ev]) handlers[ev](d); };
 
   let st = null;          // dernier état reçu
   let skew = 0;           // décalage d'horloge client/serveur
@@ -59,7 +71,7 @@
 
   // ---------- Utilitaires ----------
   const initials = (n) => n.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
-  const BOT_LEVEL = { easy: 'facile', normal: 'normal' };
+  const BOT_LEVEL = { easy: 'facile', normal: 'normal', hard: 'difficile' };
   // Avatar : 🤖 pour un robot, sinon les initiales
   const avatarText = (m) => (m.bot ? '🤖' : initials(m.name));
   const member = (id) => st && st.members.find((m) => m.id === id);
@@ -85,8 +97,16 @@
     return `<div class="card">${Cards.svg(c)}</div>`;
   }).join('');
   $('name').value = store.get('name') || '';
-  const urlCode = new URLSearchParams(location.search).get('c');
-  if (urlCode) $('code').value = urlCode.toUpperCase();
+  // Arrivé par un lien d'invitation (?c=ABCD) : on rejoint directement si le pseudo est connu
+  const urlCode = (new URLSearchParams(location.search).get('c') || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4);
+  let pendingInvite = null;
+  if (urlCode.length === 4) {
+    $('code').value = urlCode;
+    $('inviteNote').textContent = `Tu es invité dans la partie ${urlCode}.` + (store.get('name') ? '' : ' Entre ton pseudo puis touche « Rejoindre ».');
+    $('inviteNote').classList.remove('hidden');
+    if (store.get('name') && !session()) pendingInvite = urlCode;
+    else if (!store.get('name')) setTimeout(() => $('name').focus(), 300);
+  }
 
   function getName() {
     const n = $('name').value.trim();
@@ -99,42 +119,105 @@
 
   $('btnCreate').onclick = () => {
     const name = getName(); if (!name) return;
-    socket.emit('create', { name }, (res) => {
+    net.emit('create', { name }, (res) => {
       if (res.error) return ($('homeErr').textContent = res.error);
       saveSession({ code: res.code, token: res.token });
     });
   };
+  function joinCode(code, name) {
+    net.emit('join', { code, name }, (res) => {
+      if (res.error) return ($('homeErr').textContent = res.error);
+      saveSession({ code: res.code, token: res.token });
+      history.replaceState(null, '', '/');
+      $('inviteNote').classList.add('hidden');
+    });
+  }
   $('btnJoin').onclick = () => {
     const name = getName(); if (!name) return;
     const code = $('code').value.trim().toUpperCase();
     if (code.length !== 4) { $('homeErr').textContent = 'Le code fait 4 lettres.'; return; }
-    socket.emit('join', { code, name }, (res) => {
+    joinCode(code, name);
+  };
+  // Partie rapide : une table publique avec d'autres joueurs, sans échanger de code
+  $('btnQuick').onclick = () => {
+    const name = getName(); if (!name) return;
+    net.emit('quick', { name }, (res) => {
       if (res.error) return ($('homeErr').textContent = res.error);
       saveSession({ code: res.code, token: res.token });
-      history.replaceState(null, '', '/');
     });
   };
+  // Contre les robots, dans le téléphone : marche sans internet et sans attendre le serveur
+  function playOffline() {
+    const name = getName(); if (!name) return;
+    if (!self.LocalGame) return toast("Mode hors-ligne indisponible : recharge la page une fois avec internet.", 'bad');
+    net.local = self.LocalGame.create(deliverLocal);
+    net.emit('create', { name }, () => {});
+  }
+  $('btnSolo').onclick = playOffline;
+  $('btnWakeSolo').onclick = playOffline;
 
   function resume() {
     const s = session();
-    if (!s || !socket.connected) return;
+    if (!socket.connected || net.local) return;
+    const wasRestart = restarted;
+    restarted = false;
+    if (!s) {
+      // Lien d'invitation et pseudo déjà connu : on entre directement dans la partie
+      if (pendingInvite) { const code = pendingInvite; pendingInvite = null; joinCode(code, store.get('name')); }
+      return;
+    }
     socket.emit('join', { code: s.code, token: s.token, name: store.get('name') }, (res) => {
       // Refus temporaire (trop de tentatives) : on garde la session et on réessaie
       if (res.error && res.retry) { toast(res.error, 'bad'); setTimeout(resume, 5000); return; }
-      if (res.error) { clearSession(); show('home'); return; }
+      if (res.error) {
+        backHome();
+        $('homeErr').textContent = wasRestart
+          ? 'Le serveur a redémarré : la partie a été interrompue. Lance-en une nouvelle !'
+          : "Ta partie précédente n'existe plus.";
+        return;
+      }
       // Le serveur peut nous avoir recréé comme nouveau joueur (ancienne place expirée) :
       // on garde toujours le jeton renvoyé, sinon chaque actualisation ajouterait un doublon.
       saveSession({ code: res.code, token: res.token });
     });
   }
-  socket.on('connect', resume);
-  socket.on('disconnect', () => toast('Connexion perdue… reconnexion en cours', 'bad'));
+  // Bandeau de connexion : réveil du serveur (Render endort le serveur gratuit après 15 min sans visite)
+  // ou connexion perdue. Il compte les secondes pour montrer que ça avance.
+  let everConnected = false, offlineSince = Date.now(), restarted = false;
+  function updateWake() {
+    const down = !socket.connected && !net.local;
+    const late = down && Date.now() - offlineSince > 1500;
+    $('wake').classList.toggle('hidden', !late);
+    if (!late) return;
+    const secs = Math.round((Date.now() - offlineSince) / 1000);
+    $('wakeText').textContent = navigator.onLine === false
+      ? 'Pas de connexion internet'
+      : restarted ? `Le serveur redémarre… ${secs} s`
+      : everConnected ? `Connexion perdue, reconnexion… ${secs} s`
+        : `Le serveur se réveille… ${secs} s (jusqu'à 1 minute)`;
+    // Sur l'accueil : proposer de jouer contre les robots en attendant
+    $('btnWakeSolo').classList.toggle('hidden', $('home').classList.contains('hidden'));
+  }
+  setInterval(updateWake, 1000);
+  socket.on('connect', () => { everConnected = true; updateWake(); resume(); });
+  socket.on('disconnect', () => { offlineSince = Date.now(); if (!net.local) toast('Connexion perdue… reconnexion en cours', 'bad'); });
+  // Le serveur va redémarrer (mise à jour) : les parties en cours vont s'arrêter
+  socket.on('serverRestart', () => {
+    restarted = true;
+    if (net.local) return;
+    if (st) $('restartNotice').classList.remove('hidden');
+  });
+  $('restartOk').onclick = () => $('restartNotice').classList.add('hidden');
 
   // ---------- Salon ----------
-  $('btnShare').onclick = () => {
+  $('btnShare').onclick = async () => {
     const link = `${location.origin}/?c=${st.code}`;
-    const msg = `Viens jouer à CheckGames avec moi ! Code : ${st.code}\n${link}`;
-    window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+    const text = `Viens jouer à CheckGames avec moi ! Code : ${st.code}`;
+    // Feuille de partage du téléphone (WhatsApp, SMS, Messenger…), sinon WhatsApp directement
+    if (navigator.share) {
+      try { await navigator.share({ title: 'CheckGames', text, url: link }); return; } catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    window.open('https://wa.me/?text=' + encodeURIComponent(text + '\n' + link), '_blank');
   };
   $('btnCopy').onclick = async () => {
     const link = `${location.origin}/?c=${st.code}`;
@@ -143,25 +226,35 @@
   document.querySelectorAll('[data-step]').forEach((b) => {
     b.onclick = () => {
       const key = b.dataset.step, d = +b.dataset.d;
-      socket.emit('settings', { ...st.settings, [key]: st.settings[key] + d }, (r) => r.error && toast(r.error, 'bad'));
+      net.emit('settings', { ...st.settings, [key]: st.settings[key] + d }, (r) => r.error && toast(r.error, 'bad'));
     };
   });
-  $('sMode').onchange = () => socket.emit('settings', { ...st.settings, mode: $('sMode').value }, () => {});
-  const addBot = (level) => socket.emit('addBot', { level }, (r) => r.error && toast(esc(r.error), 'bad'));
+  $('sMode').onchange = () => net.emit('settings', { ...st.settings, mode: $('sMode').value }, () => {});
+  const addBot = (level) => net.emit('addBot', { level }, (r) => r.error && toast(esc(r.error), 'bad'));
   $('btnBotEasy').onclick = () => addBot('easy');
   $('btnBotNormal').onclick = () => addBot('normal');
-  $('btnStart').onclick = () => socket.emit('start', {}, (r) => { $('lobbyErr').textContent = r.error || ''; });
+  $('btnBotHard').onclick = () => addBot('hard');
+  // Notification quand c'est ton tour, même si tu regardes une autre appli
+  const canNotify = 'Notification' in window && 'serviceWorker' in navigator;
+  $('btnNotify').onclick = async () => {
+    try { await Notification.requestPermission(); } catch { /* */ }
+    renderLobby();
+  };
+  $('btnStart').onclick = () => net.emit('start', {}, (r) => { $('lobbyErr').textContent = r.error || ''; });
   function backHome() {
-    clearSession(); st = null; selected = null; lastTopId = null; lastTurnId = null; prevPhase = null;
-    ['quitModal', 'endModal', 'suitModal', 'restartModal', 'kickModal', 'reactTray'].forEach((id) => $(id).classList.add('hidden'));
+    clearSession(); st = null; selected = null; lastTopId = null; lastTurnId = null; prevPhase = null; prevHand = new Set();
+    net.local = null;
+    ['quitModal', 'endModal', 'suitModal', 'restartModal', 'kickModal', 'reactTray', 'restartNotice'].forEach((id) => $(id).classList.add('hidden'));
+    $('homeErr').textContent = '';
     show('home');
+    renderMyStats();
   }
   function quit() {
-    socket.emit('leave', {}, () => {});
+    net.emit('leave', {}, () => {});
     backHome();
   }
   // Exclu par l'hôte
-  socket.on('kicked', () => {
+  onNet('kicked', () => {
     backHome();
     $('homeErr').textContent = "L'hôte t'a exclu de la partie.";
   });
@@ -178,7 +271,7 @@
   $('kickNo').onclick = () => { $('kickModal').classList.add('hidden'); kickTarget = null; };
   $('kickYes').onclick = () => {
     $('kickModal').classList.add('hidden');
-    if (kickTarget) socket.emit('kick', { id: kickTarget }, (r) => r.error && toast(esc(r.error), 'bad'));
+    if (kickTarget) net.emit('kick', { id: kickTarget }, (r) => r.error && toast(esc(r.error), 'bad'));
     kickTarget = null;
   };
   $('btnLeave').onclick = quit;
@@ -190,12 +283,15 @@
   $('restartNo').onclick = () => $('restartModal').classList.add('hidden');
   $('restartYes').onclick = () => {
     $('restartModal').classList.add('hidden');
-    socket.emit('restartRound', {}, (r) => r.error && toast(r.error, 'bad'));
+    net.emit('restartRound', {}, (r) => r.error && toast(r.error, 'bad'));
   };
 
   function renderLobby() {
     show('lobby');
-    $('lobbyCode').textContent = st.code;
+    $('lobbyCode').textContent = st.offline ? 'SOLO' : st.code;
+    $('lobbyCodeLabel').textContent = st.offline ? 'Partie hors-ligne contre les robots' : st.public ? 'Partie rapide (publique)' : 'Code de la partie';
+    $('shareRow').classList.toggle('hidden', !!st.offline);
+    $('btnNotify').classList.toggle('hidden', !!st.offline || !canNotify || Notification.permission !== 'default');
     $('playerCount').textContent = `(${st.members.length}/5)`;
     $('lobbyPlayers').innerHTML = st.members.map((m) => `<li>
       <div class="avatar${m.connected ? '' : ' away'}${m.bot ? ' bot' : ''}">${esc(avatarText(m))}</div>
@@ -210,9 +306,13 @@
     $('settings').classList.toggle('readonly', !isHost());
     $('btnStart').classList.toggle('hidden', !isHost());
     $('botRow').classList.toggle('hidden', !isHost() || st.members.length >= 5);
-    $('lobbyHint').textContent = !isHost()
-      ? "En attente de l'hôte pour lancer la partie…"
-      : st.members.length < 2 ? 'Il faut au moins 2 joueurs : partage le code ou ajoute un robot !' : '';
+    $('lobbyHint').textContent = st.offline
+      ? (st.members.length < 2 ? 'Ajoute au moins un robot, puis lance la partie.' : 'Pas besoin d\'internet : tout se passe dans ton téléphone.')
+      : !isHost()
+        ? "En attente de l'hôte pour lancer la partie…" + (st.public ? " D'autres joueurs peuvent encore arriver." : '')
+        : st.members.length < 2
+          ? (st.public ? 'Partie publique : attends que quelqu\'un arrive, ou ajoute un robot.' : 'Il faut au moins 2 joueurs : partage le code ou ajoute un robot !')
+          : st.public ? "Partie publique : d'autres joueurs peuvent encore arriver." : '';
     $('btnStart').disabled = st.members.length < 2;
   }
 
@@ -230,14 +330,14 @@
     if (!myTurn()) return toast("Ce n'est pas ton tour.");
     if (st.game.mustPlay) return toast('La banque est vide : tu dois poser une carte.', 'bad');
     selected = null;
-    socket.emit('draw', {}, (r) => r.error && toast(r.error, 'bad'));
+    net.emit('draw', {}, (r) => r.error && toast(r.error, 'bad'));
   }
   $('btnDraw').onclick = doDraw;
   $('drawPile').onclick = doDraw;
   // « Check » : soit annoncé en posant l'avant-dernière carte (bouton armé), soit juste après
   let checkArmed = false;
   $('btnCheck').onclick = () => {
-    if (st.game.canCheck) return socket.emit('check', {}, (r) => r.error && toast(r.error, 'bad'));
+    if (st.game.canCheck) return net.emit('check', {}, (r) => r.error && toast(r.error, 'bad'));
     checkArmed = !checkArmed;
     renderGame();
   };
@@ -253,7 +353,7 @@
     send(card.id);
   }
   function send(cardId, suit) {
-    socket.emit('play', { cardId, suit, check: checkArmed }, (r) => { if (r.error) toast(r.error, 'bad'); });
+    net.emit('play', { cardId, suit, check: checkArmed }, (r) => { if (r.error) toast(r.error, 'bad'); });
     selected = null;
     checkArmed = false;
   }
@@ -272,7 +372,7 @@
     show('game');
     const g = st.game;
     const s = st.settings;
-    $('gCode').textContent = st.code;
+    $('gCode').textContent = st.offline ? 'SOLO' : st.code;
     $('btnRestart').classList.toggle('hidden', !(isHost() && st.phase === 'playing'));
     $('gRound').textContent = `Manche ${st.roundsPlayed + (st.phase === 'playing' ? 1 : 0)} · ` +
       (s.mode === 'wins' ? `premier à ${s.target}` : `${s.target} manches`) + (st.tiebreak ? ' · décisive' : '') +
@@ -297,11 +397,12 @@
     }).join('');
     if (isHost()) $('opponents').querySelectorAll('.opp').forEach((el) => { el.onclick = () => openKick(el.dataset.id); });
 
-    // Table
+    // Table : la carte posée arrive depuis le joueur qui l'a jouée
     if (g.top.id !== lastTopId) {
       $('topCard').innerHTML = Cards.svg(g.top);
-      $('topCard').classList.remove('flash'); void $('topCard').offsetWidth; $('topCard').classList.add('flash');
+      if (lastTopId) flyIn($('topCard'), lastPlayBy);
       lastTopId = g.top.id;
+      lastPlayBy = null;
     }
     $('deckCount').textContent = g.deckCount;
     $('bPenalty').classList.toggle('hidden', !g.penalty);
@@ -342,10 +443,16 @@
     const avail = Math.min(window.innerWidth, 520) - 40;
     const overlap = n > 1 ? Math.max(-56, Math.min(-12, (avail - 72 * n) / (n - 1))) : 0;
     $('hand').style.setProperty('--overlap', overlap + 'px');
+    // Les cartes reçues (distribution ou pioche) glissent depuis la banque
+    const dealing = prevHand.size === 0;
+    let k = 0;
     $('hand').innerHTML = g.hand.map((c) => {
       const ok = g.playable.includes(c.id);
-      return `<div class="card${mine && !ok ? ' dim' : ''}${selected === c.id ? ' sel' : ''}" data-id="${c.id}">${Cards.svg(c)}</div>`;
+      const isNew = !prevHand.has(c.id) && motion;
+      const delay = isNew ? ` style="animation-delay:${dealing ? (k++) * 70 : (k++) * 120}ms"` : '';
+      return `<div class="card${mine && !ok ? ' dim' : ''}${selected === c.id ? ' sel' : ''}${isNew ? ' in' : ''}" data-id="${c.id}"${delay}>${Cards.svg(c)}</div>`;
     }).join('');
+    prevHand = new Set(g.hand.map((c) => c.id));
     $('hand').querySelectorAll('.card').forEach((el) => {
       el.onclick = () => {
         const id = el.dataset.id;
@@ -357,10 +464,65 @@
     });
 
     if (g.turnId !== lastTurnId) {
-      if (mine) { sfx.turn(); vibrate(60); }
+      if (mine) yourTurn();
       lastTurnId = g.turnId;
     }
     tick();
+  }
+
+  // C'est ton tour : son, vibration, et si tu regardes ailleurs, titre de l'onglet + notification
+  const baseTitle = document.title;
+  function yourTurn() {
+    sfx.turn();
+    vibrate([80, 60, 80]);
+    if (!document.hidden) return;
+    document.title = '🔔 À toi de jouer !';
+    if (canNotify && Notification.permission === 'granted') {
+      navigator.serviceWorker.ready.then((reg) => reg.showNotification('CheckGames', {
+        body: "À toi de jouer !", tag: 'turn', renotify: true, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', vibrate: [80, 60, 80],
+      })).catch(() => {});
+    }
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) document.title = baseTitle; });
+
+  // ---------- Animations ----------
+  const motion = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let lastPlayBy = null;       // qui vient de poser la carte du dessus
+  let prevHand = new Set();    // cartes déjà dans ma main (les nouvelles glissent)
+  // Point de départ d'une animation : l'avatar d'un adversaire, ou ma main
+  function originOf(playerId) {
+    const el = st && playerId === st.you ? $('hand') : document.querySelector(`.opp[data-id="${CSS.escape(playerId || '')}"] .avatar`);
+    return el && el.getBoundingClientRect();
+  }
+  function flyIn(el, playerId) {
+    const from = motion && originOf(playerId);
+    if (!from || !el.animate) return;
+    const to = el.getBoundingClientRect();
+    const dx = from.left + from.width / 2 - (to.left + to.width / 2), dy = from.top + from.height / 2 - (to.top + to.height / 2);
+    el.animate([
+      { transform: `translate(${dx}px, ${dy}px) scale(.45) rotate(-12deg)`, opacity: 0.4 },
+      { transform: 'none', opacity: 1 },
+    ], { duration: 340, easing: 'cubic-bezier(.2,.8,.3,1)' });
+  }
+  // Un adversaire pioche : des dos de cartes partent de la banque vers lui
+  function flyDraw(playerId, count) {
+    if (!motion || !st || playerId === st.you || $('game').classList.contains('hidden')) return;
+    const to = originOf(playerId), from = $('backCard').getBoundingClientRect();
+    if (!to || !from.width) return;
+    for (let i = 0; i < Math.min(count, 4); i++) {
+      const c = document.createElement('div');
+      c.className = 'card fly';
+      c.innerHTML = Cards.back();
+      Object.assign(c.style, { left: from.left + 'px', top: from.top + 'px', width: from.width + 'px' });
+      document.body.appendChild(c);
+      const dx = to.left + to.width / 2 - (from.left + from.width / 2), dy = to.top + to.height / 2 - (from.top + from.height / 2);
+      const a = c.animate([
+        { transform: 'none', opacity: 1 },
+        { transform: `translate(${dx}px, ${dy}px) scale(.3)`, opacity: 0.2 },
+      ], { duration: 420, delay: i * 110, easing: 'ease-in', fill: 'backwards' });
+      a.onfinish = () => c.remove();
+      setTimeout(() => c.remove(), 1200);
+    }
   }
 
   function tick() {
@@ -380,8 +542,8 @@
   setInterval(tick, 500);
 
   // ---------- Fin de manche / match ----------
-  $('btnNext').onclick = () => socket.emit('start', {}, (r) => r.error && toast(r.error, 'bad'));
-  $('btnLobby').onclick = () => socket.emit('toLobby', {}, () => {});
+  $('btnNext').onclick = () => net.emit('start', {}, (r) => r.error && toast(r.error, 'bad'));
+  $('btnLobby').onclick = () => net.emit('toLobby', {}, () => {});
 
   function renderEnd() {
     const over = st.phase === 'matchEnd';
@@ -402,7 +564,7 @@
   }
 
   // ---------- Réception ----------
-  socket.on('state', (s) => {
+  onNet('state', (s) => {
     st = s;
     skew = s.now - Date.now();
     if (s.phase === 'lobby') {
@@ -411,7 +573,7 @@
     } else {
       if (s.game) renderGame();
       if (s.phase === 'roundEnd' || s.phase === 'matchEnd') {
-        if (prevPhase === 'playing') sfx.win();
+        if (prevPhase === 'playing') { sfx.win(); countStats(s); }
         renderEnd();
       } else {
         $('endModal').classList.add('hidden');
@@ -420,13 +582,14 @@
     prevPhase = s.phase;
   });
 
-  socket.on('events', (evs) => {
+  onNet('events', (evs) => {
     for (const e of evs) {
       const who = esc(nameOf(e.playerId)); // le nom est choisi par le joueur : jamais de HTML brut
       const mine = e.playerId === (st && st.you);
       switch (e.type) {
         case 'play': {
           sfx.play();
+          lastPlayBy = e.playerId;
           let t = `${who} pose ${Cards.label(e.card)}`;
           if (e.commanded) t += ` et commande ${Cards.suitIcon(e.commanded)} ${Cards.SUIT_NAMES[e.commanded]}`;
           if (e.card.rank === '7' || e.card.rank === 'JOKER') t += ` · pénalité ${e.penalty}`;
@@ -435,12 +598,13 @@
         }
         case 'draw':
           sfx.draw();
+          flyDraw(e.playerId, e.count);
           if (e.penalty) { toast(`${mine ? 'Tu pioches' : who + ' pioche'} ${e.count} carte${e.count > 1 ? 's' : ''}`, 'bad'); if (mine) { sfx.penalty(); vibrate([90, 50, 90]); } }
           else if (!mine) toast(`${who} pioche`);
           break;
         case 'timeout': toast(`Temps écoulé pour ${mine ? 'toi' : who}`, 'bad'); break;
         case 'check': sfx.check(); toast(mine ? '« Check ! » annoncé' : `${who} : « Check ! »`, 'good'); break;
-        case 'forgotCheck': toast(`${mine ? 'Tu as' : who + ' a'} oublié de dire Check : +${e.count} carte`, 'bad'); if (mine) vibrate(150); break;
+        case 'forgotCheck': flyDraw(e.playerId, e.count); toast(`${mine ? 'Tu as' : who + ' a'} oublié de dire Check : +${e.count} carte`, 'bad'); if (mine) vibrate(150); break;
         case 'skip': toast(mine ? 'Tu sautes ton tour' : `${who} saute son tour`); break;
         case 'reshuffle': toast('La banque est remélangée'); break;
         case 'playerLeft': toast(`${esc(e.name)} a quitté la partie`, 'bad'); break;
@@ -448,9 +612,10 @@
         case 'waiting': if (!mine) toast(`${esc(e.name)} est arrivé : il jouera à la prochaine manche`); break;
         case 'react': showReaction(e.playerId, e.emoji, who); break;
         case 'blocked': toast(`Plus personne ne peut jouer : ${mine ? 'tu gagnes' : who + ' gagne'} avec le moins de cartes`, 'good'); break;
-        case 'restart': selected = null; toast("L'hôte recommence la manche"); break;
+        case 'restart': selected = null; prevHand = new Set(); toast("L'hôte recommence la manche"); break;
+        case 'seats': toast('🔀 Places tirées au hasard pour ce match'); break;
         case 'notEnough': toast('Plus assez de joueurs : retour au salon', 'bad'); break;
-        case 'roundStart': lastTopId = null; lastTurnId = null; toast('Nouvelle manche !', 'good'); break;
+        case 'roundStart': lastTopId = null; lastTurnId = null; prevHand = new Set(); toast('Nouvelle manche !', 'good'); break;
         default: break;
       }
     }
@@ -458,28 +623,57 @@
 
   // ---------- Réactions ----------
   const REACTIONS = ['😂', '🔥', '😤', '👏', '😱', '🙏'];
-  $('reactTray').innerHTML = REACTIONS.map((e) => `<button data-emoji="${e}" aria-label="Réaction ${e}">${e}</button>`).join('');
+  const PHRASES = ['Joue vite !', 'Bien joué !', "C'est chaud !", 'Tu vas voir…', 'On dit quoi ?', 'Revanche ?'];
+  $('reactTray').innerHTML = '<div class="emojis">' + REACTIONS.map((e) => `<button data-emoji="${e}" aria-label="Réaction ${e}">${e}</button>`).join('') + '</div>' +
+    '<div class="phrases">' + PHRASES.map((p) => `<button class="phrase" data-emoji="${esc(p)}">${esc(p)}</button>`).join('') + '</div>';
   $('btnReact').onclick = () => $('reactTray').classList.toggle('hidden');
   $('reactTray').querySelectorAll('button').forEach((b) => {
     b.onclick = () => {
       $('reactTray').classList.add('hidden');
-      socket.emit('react', { emoji: b.dataset.emoji }, (r) => r.error && toast(esc(r.error), 'bad'));
+      net.emit('react', { emoji: b.dataset.emoji }, (r) => r.error && toast(esc(r.error), 'bad'));
     };
   });
   function showReaction(playerId, emoji, who) {
-    if (!REACTIONS.includes(emoji)) return;
+    const phrase = PHRASES.includes(emoji);
+    if (!REACTIONS.includes(emoji) && !phrase) return;
     const mine = st && playerId === st.you;
     const target = mine ? $('meAvatar') : document.querySelector(`.opp[data-id="${CSS.escape(playerId)}"] .avatar`);
     if (!target || $('game').classList.contains('hidden')) return toast(`${mine ? 'Toi' : who} ${emoji}`);
     const r = target.getBoundingClientRect();
     const el = document.createElement('div');
-    el.className = 'bubble';
+    el.className = 'bubble' + (phrase ? ' text' : '');
     el.textContent = emoji;
-    el.style.left = r.left + r.width / 2 + 'px';
     el.style.top = r.top + 'px';
     document.body.appendChild(el);
+    // Jamais coupée par le bord de l'écran (avatar tout à gauche ou tout à droite)
+    const half = el.offsetWidth / 2 + 8;
+    el.style.left = Math.min(window.innerWidth - half, Math.max(half, r.left + r.width / 2)) + 'px';
     setTimeout(() => el.remove(), 1800);
   }
+
+  // ---------- Mes statistiques (gardées dans le téléphone) ----------
+  function myStats() {
+    try { return { rounds: 0, roundWins: 0, matches: 0, matchWins: 0, ...JSON.parse(store.get('stats') || '{}') }; } catch { return { rounds: 0, roundWins: 0, matches: 0, matchWins: 0 }; }
+  }
+  function countStats(s) {
+    if (!s.game || !s.game.players.some((p) => p.id === s.you)) return; // spectateur : rien à compter
+    const m = myStats();
+    m.rounds++;
+    if (s.game.winnerId === s.you) m.roundWins++;
+    if (s.phase === 'matchEnd') { m.matches++; if (s.matchWinnerId === s.you) m.matchWins++; }
+    store.set('stats', JSON.stringify(m));
+  }
+  function renderMyStats() {
+    const m = myStats();
+    $('myStats').classList.toggle('hidden', !m.rounds);
+    const pct = m.rounds ? Math.round((m.roundWins / m.rounds) * 100) : 0;
+    $('myStatsBody').innerHTML =
+      `<div><b>${m.roundWins}/${m.rounds}</b><span>manches gagnées</span></div>` +
+      `<div><b>${pct} %</b><span>de réussite</span></div>` +
+      `<div><b>${m.matchWins}/${m.matches}</b><span>matchs gagnés</span></div>`;
+  }
+  $('btnResetStats').onclick = () => { if (confirm('Remettre tes statistiques à zéro ?')) { store.del('stats'); renderMyStats(); } };
+  renderMyStats();
 
   // ---------- Appli installable (PWA) ----------
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

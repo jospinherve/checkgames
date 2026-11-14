@@ -233,4 +233,14 @@ t('le joueur qui doit subir la pénalité quitte : la pénalité est annulée', 
   assert.strictEqual(g.current.id, 'p2');
 });
 
+t('la pioche indique la couleur qui était demandée (info publique pour les robots)', () => {
+  let g = setup([['2C', '9S'], ['6H']], '3H');
+  g.draw('p0');
+  assert.strictEqual(g.events.find((e) => e.type === 'draw').need, 'H');
+  g = setup([['7H', '2C'], ['3S', '4S']], '9H');
+  g.play('p0', '7H');
+  g.draw('p1');
+  assert.strictEqual(g.events.find((e) => e.type === 'draw').need, null, 'sous pénalité : rien à déduire');
+});
+
 console.log(`\n${n} tests réussis`);

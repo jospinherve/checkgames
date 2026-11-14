@@ -6,7 +6,7 @@ process.env.RECONNECT_MS = '300';
 process.env.BOT_DELAY_MS = '20'; // robots rapides pendant les tests
 const assert = require('assert');
 const { io: Client } = require('socket.io-client');
-const { server, rooms } = require('../server');
+const { server, rooms, notifyRestart } = require('../server');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let url;
@@ -168,7 +168,7 @@ t("l'hôte exclut un joueur pendant la manche : la partie continue, il ne peut p
   assert.ok((await ask(host, 'kick', { id: target })).ok);
   await kicked;
   await wait(50);
-  assert.deepStrictEqual(names(code), ['H', 'P2']);
+  assert.deepStrictEqual(names(code).sort(), ['H', 'P2']);
   assert.strictEqual(rooms.get(code).game.players.length, 2);
   assert.ok(host.events.some((e) => e.type === 'playerKicked' && e.name === 'P1'));
   // Ses actions ne comptent plus, et il ne revient pas avec sa session
@@ -176,7 +176,7 @@ t("l'hôte exclut un joueur pendant la manche : la partie continue, il ne peut p
   const back = await client();
   const r = await ask(back, 'join', { code, token: p1.token, name: 'P1' });
   assert.match(r.error, /exclu/);
-  assert.deepStrictEqual(names(code), ['H', 'P2']);
+  assert.deepStrictEqual(names(code).sort(), ['H', 'P2']);
   [host, p1, p2, back].forEach((c) => c.close());
 });
 
@@ -351,6 +351,113 @@ t('manifest et service worker servis', async () => {
   const sw = await fetch(url + '/sw.js');
   assert.strictEqual(sw.status, 200);
   assert.match(sw.headers.get('content-type'), /javascript/);
+});
+
+// ---------- Places au hasard ----------
+
+t('chaque nouveau match tire les places au hasard (les manches suivantes gardent l\'ordre)', async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'H' });
+  for (let i = 0; i < 3; i++) await ask(host, 'addBot', { level: 'easy' });
+  const r = rooms.get(code);
+  const orders = new Set();
+  for (let k = 0; k < 15; k++) {
+    await ask(host, 'start');
+    const order = r.game.players.map((p) => p.id).join();
+    assert.strictEqual(order, r.members.map((m) => m.id).join(), 'ordre de jeu = ordre des places');
+    orders.add(order);
+    // fin de match forcée, puis revanche
+    clearTimeout(r.timer); r.phase = 'matchEnd'; r.game = null;
+  }
+  assert.ok(orders.size > 1, 'les places changent d\'un match à l\'autre');
+  assert.deepStrictEqual(names(code).sort(), r.members.map((m) => m.name).sort());
+  // Manche suivante du même match : même ordre
+  await ask(host, 'start');
+  const before = r.members.map((m) => m.id).join();
+  r.game.winnerId = r.game.players[0].id; clearTimeout(r.timer); r.phase = 'roundEnd';
+  await ask(host, 'start');
+  assert.strictEqual(r.members.map((m) => m.id).join(), before);
+  await wait(30);
+  assert.ok(host.events.some((e) => e.type === 'seats'));
+  host.close();
+});
+
+// ---------- Partie rapide ----------
+
+t('partie rapide : deux inconnus se retrouvent à la même table publique', async () => {
+  const a = await client(), b = await client(), priv = await client();
+  await ask(priv, 'create', { name: 'Prive' }); // une partie privée n'est jamais proposée
+  const ra = await ask(a, 'quick', { name: 'Ana' });
+  const rb = await ask(b, 'quick', { name: 'Ben' });
+  assert.ok(ra.ok && rb.ok);
+  assert.strictEqual(ra.code, rb.code);
+  assert.deepStrictEqual(names(ra.code), ['Ana', 'Ben']);
+  await wait(30);
+  assert.strictEqual(b.state.public, true);
+  assert.strictEqual(priv.state.public, false);
+  for (const s of [a, b, priv]) s.close();
+});
+
+t('partie rapide : table pleine ou déjà lancée → nouvelle table', async () => {
+  const host = await client();
+  const { code } = await ask(host, 'quick', { name: 'H' });
+  for (let i = 0; i < 4; i++) await ask(host, 'addBot', { level: 'easy' });
+  const late = await client();
+  const r = await ask(late, 'quick', { name: 'Late' });
+  assert.ok(r.ok);
+  assert.notStrictEqual(r.code, code);
+  assert.strictEqual(rooms.get(r.code).public, true);
+  host.close(); late.close();
+});
+
+// ---------- Phrases, robot difficile, mode hors-ligne, redémarrage ----------
+
+t('phrases rapides : seulement celles de la liste', async () => {
+  const host = await client();
+  await ask(host, 'create', { name: 'H' });
+  assert.ok((await ask(host, 'react', { emoji: 'Bien joué !' })).ok);
+  assert.ok((await ask(host, 'react', { emoji: 'Tu es nul' })).error);
+  await wait(30);
+  assert.ok(host.events.some((e) => e.type === 'react' && e.emoji === 'Bien joué !'));
+  host.close();
+});
+
+t('robot difficile : une partie complète contre lui se termine', async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'H' });
+  assert.ok((await ask(host, 'addBot', { level: 'hard' })).ok);
+  await ask(host, 'settings', { handSize: 3, mode: 'wins', target: 1 });
+  await ask(host, 'start');
+  const end = Date.now() + 15000;
+  while (Date.now() < end && host.state.phase === 'playing') {
+    const g = host.state.game;
+    if (g.turnId === host.state.you) {
+      if (g.playable.length) await ask(host, 'play', { cardId: g.playable[0], suit: 'H', check: true });
+      else await ask(host, 'draw');
+    }
+    await wait(80);
+  }
+  assert.strictEqual(rooms.get(code).phase, 'matchEnd');
+  host.close();
+});
+
+t('les règles et les robots sont servis au navigateur (mode hors-ligne)', async () => {
+  for (const f of ['/lib/game.js', '/lib/bot.js', '/local.js']) {
+    const r = await fetch(url + f);
+    assert.strictEqual(r.status, 200, f);
+    assert.match(r.headers.get('content-type'), /javascript/);
+  }
+  assert.strictEqual((await fetch(url + '/server.js')).status, 404, 'le code du serveur reste privé');
+});
+
+t('redémarrage du serveur : les joueurs sont prévenus', async () => {
+  const s = await client();
+  let warned = false;
+  s.on('serverRestart', () => { warned = true; });
+  notifyRestart();
+  await wait(50);
+  assert.ok(warned);
+  s.close();
 });
 
 (async () => {

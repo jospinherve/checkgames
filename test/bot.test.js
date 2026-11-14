@@ -2,7 +2,7 @@
 // Tests du robot : coups toujours légaux, stratégie du niveau normal, oubli du « Check »
 const assert = require('assert');
 const { Game } = require('../game');
-const { decide } = require('../bot');
+const { decide, observe, newMemory, thinkMs } = require('../bot');
 
 const C = (id) => {
   if (id === 'JKR') return { id, rank: 'JOKER', suit: null, color: 'red' };
@@ -28,13 +28,15 @@ t('1000 parties entre robots : toujours des coups légaux, et elles se terminent
   for (let k = 0; k < 1000; k++) {
     const np = 2 + (k % 4);
     const g = new Game(Array.from({ length: np }, (_, i) => ({ id: 'p' + i })), { handSize: 3 + (k % 6) });
-    const level = (i) => ((i + k) % 2 ? 'easy' : 'normal');
+    const level = (i) => ['easy', 'normal', 'hard'][(i + k) % 3];
+    const memo = newMemory();
     let guard = 0;
     while (!g.winnerId) {
       assert(guard++ < 5000, 'partie sans fin');
       const p = g.current;
-      const d = decide(g.publicState(p.id), p.id, level(g.players.indexOf(p)));
+      const d = decide(g.publicState(p.id), p.id, level(g.players.indexOf(p)), Math.random, memo);
       const res = d.action === 'play' ? g.play(p.id, d.cardId, d.suit, d.check) : g.draw(p.id);
+      observe(memo, g.events.splice(0));
       assert(res.ok, `coup refusé : ${res.error} (${JSON.stringify(d)})`);
       const all = [...g.deck, ...g.discard, ...g.players.flatMap((x) => x.hand)].map((c) => c.id);
       assert.strictEqual(new Set(all).size, 54);
@@ -127,6 +129,44 @@ t('le robot normal bat le robot facile la plupart du temps', () => {
   }
   console.log(`   (normal gagne ${(wins / N * 100).toFixed(0)} % contre facile)`);
   assert(wins / N > 0.55);
+});
+
+t('difficile : retient la couleur qui manque au suivant (il a pioché sur ♥)', () => {
+  const memo = newMemory();
+  observe(memo, [{ type: 'roundStart' }, { type: 'draw', playerId: 'p1', count: 1, penalty: false, need: 'H' }]);
+  assert.deepStrictEqual(memo.lacks.p1, { H: true });
+  observe(memo, [{ type: 'draw', playerId: 'p1', count: 2, penalty: true, need: null }]);
+  assert.deepStrictEqual(memo.lacks.p1, { H: true }, 'une pénalité ne dit rien');
+  observe(memo, [{ type: 'play', playerId: 'p1', card: { id: '4H', rank: '4', suit: 'H' } }]);
+  assert.deepStrictEqual(memo.lacks.p1, {}, 'il vient de poser du ♥');
+  observe(memo, [{ type: 'draw', playerId: 'p1', count: 1, penalty: false, need: 'S' }, { type: 'roundStart' }]);
+  assert.deepStrictEqual(memo.lacks, {}, 'oublié à la manche suivante');
+});
+
+t('difficile : impose la couleur que le suivant n\'a pas', () => {
+  // Sur 5♣ : 5♦ (passe au ♦) ou un ♣ (sa couleur la plus fournie) ; le suivant n'a pas de ♦
+  const g = setup([['5D', '9C', '2C', 'KS'], ['2H', '3H', '4H', '6H']], '5C');
+  const memo = { lacks: { p1: { D: true } } };
+  assert.strictEqual(decide(view(g), 'p0', 'hard', fixed(0.5), memo).cardId, '5D');
+  assert.strictEqual(decide(view(g), 'p0', 'normal', fixed(0.5), memo).cardId, '9C', 'le normal ne s\'en sert pas');
+});
+
+t('difficile : son valet demande une couleur que le suivant n\'a pas', () => {
+  const g = setup([['JD', '2C', '9S'], ['2D', '3D']], '3H');
+  const d = decide(view(g), 'p0', 'hard', fixed(0.5), { lacks: { p1: { S: true } } });
+  assert.strictEqual(d.cardId, 'JD');
+  assert.strictEqual(d.suit, 'S');
+});
+
+t('difficile : n\'oublie jamais « Check », et joue vite quand un adversaire l\'a oublié', () => {
+  const g = setup([['5H', '9C'], ['2D', '3D', '4D']], '3H');
+  assert.strictEqual(decide(view(g), 'p0', 'hard', fixed(0)).check, true);
+  const calm = thinkMs({ players: [{ id: 'a', count: 3 }, { id: 'b', count: 1, checked: true }] }, 'a', 'hard', 1000, fixed(0.5));
+  const trap = thinkMs({ players: [{ id: 'a', count: 3 }, { id: 'b', count: 1, checked: false }] }, 'a', 'hard', 1000, fixed(0.5));
+  const normal = thinkMs({ players: [{ id: 'a', count: 3 }, { id: 'b', count: 1, checked: false }] }, 'a', 'normal', 1000, fixed(0.5));
+  assert.strictEqual(calm, 1000);
+  assert.strictEqual(normal, 1000);
+  assert(trap < 500, `piège : ${trap} ms`);
 });
 
 console.log(`\n${n} tests robot réussis`);

@@ -97,8 +97,6 @@ input:focus, select:focus { border-color: var(--accent); }
 .card { width: 64px; aspect-ratio: 200 / 290; }
 .card.big { width: min(30vw, 124px); }
 .card-svg { width: 100%; height: 100%; display: block; }
-#topCard.flash { animation: land .35s ease-out; }
-@keyframes land { from { transform: translateY(-30px) scale(1.15) rotate(-6deg); opacity: .3; } }
 .status { margin: 4px 0 0; font-size: 16px; font-weight: 600; text-align: center; min-height: 1.3em; padding: 0 12px; }
 .status.mine { color: var(--accent-l); }
 
@@ -168,3 +166,36 @@ button, .card, .pile { touch-action: manipulation; }
 /* Robots */
 .avatar.bot { background: var(--accent-d); font-size: 22px; }
 #botRow .btn { font-size: 14px; }
+
+/* ---------- Réveil du serveur ---------- */
+.wake { position: fixed; top: 0; left: 0; right: 0; z-index: 40; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 10px; padding: calc(8px + env(safe-area-inset-top)) 16px 8px; background: var(--accent-d); color: #fff; font-size: 14px; font-weight: 600; text-align: center; }
+.wake .btn { font-size: 13px; padding: 7px 12px; background: rgba(255, 255, 255, .15); border-color: rgba(255, 255, 255, .35); }
+.spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .35); border-top-color: #fff; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Accueil ---------- */
+.center { text-align: center; margin: 0; }
+.invite { background: var(--s1); border: 1px dashed var(--accent); border-radius: 12px; padding: 10px 12px; text-align: center; color: var(--accent-l); margin: 0; }
+.mystats { background: var(--s1); border-radius: 12px; padding: 10px 14px; }
+.mystats-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+.linkbtn { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 0; text-decoration: underline; cursor: pointer; padding: 0; }
+.mystats-body { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; text-align: center; }
+.mystats-body b { display: block; font-size: 20px; color: var(--accent-l); }
+.mystats-body span { font-size: 11px; color: var(--muted); }
+#botRow .muted { margin: 4px 0; text-align: left; }
+#botRow .btn { font-size: 13px; padding: 10px 4px; }
+
+/* ---------- Phrases rapides ---------- */
+.react-tray { flex-direction: column; gap: 4px; }
+.react-tray .emojis { display: flex; justify-content: center; gap: 6px; }
+.react-tray .phrases { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding-bottom: 4px; }
+.react-tray button.phrase { font-size: 13px; font-weight: 600; color: var(--text); background: var(--s2); border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; }
+.bubble.text { font-size: 14px; font-weight: 700; color: var(--bg); background: var(--accent-l); border-radius: 12px; padding: 6px 10px; white-space: nowrap; box-shadow: 0 4px 12px rgba(0, 0, 0, .4); }
+
+/* ---------- Animations des cartes ---------- */
+.hand .card.in { animation: dealIn .38s cubic-bezier(.2, .8, .3, 1) both; }
+@keyframes dealIn { from { transform: translateY(-140px) scale(.6) rotate(8deg); opacity: 0; } }
+.card.fly { position: fixed; z-index: 24; pointer-events: none; aspect-ratio: 200 / 290; }
+@media (prefers-reduced-motion: reduce) { .hand .card.in { animation: none; } .spinner { animation: none; } }
+/* Plateau de réactions ouvert : les messages passent en dessous */
+body:has(#reactTray:not(.hidden)) .toasts { top: 250px; }

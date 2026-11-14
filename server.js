@@ -42,6 +42,9 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+// Les règles et les robots tournent aussi dans le navigateur (mode hors-ligne contre les robots)
+app.get('/lib/game.js', (_req, res) => res.sendFile(path.join(__dirname, 'game.js')));
+app.get('/lib/bot.js', (_req, res) => res.sendFile(path.join(__dirname, 'bot.js')));
 app.get('/health', (_req, res) => res.send('ok'));
 
 // ---------- Statistiques en direct ----------
@@ -139,6 +142,8 @@ function createRoom() {
     timer: null,
     matchWinnerId: null,
     banned: new Set(), // jetons des joueurs exclus par l'hôte
+    public: false,     // partie rapide : ouverte aux inconnus
+    memo: Bot.newMemory(), // ce que les robots ont vu sur la table
     lastSeen: Date.now(),
   };
   rooms.set(room.code, room);
@@ -162,6 +167,7 @@ function viewFor(room, member) {
     you: member.id,
     hostId: room.hostId,
     phase: room.phase,
+    public: room.public,
     settings: room.settings,
     roundsPlayed: room.roundsPlayed,
     tiebreak: room.tiebreak,
@@ -187,6 +193,7 @@ function broadcast(room) {
 function flushEvents(room) {
   if (!room.game) return;
   const evts = room.game.events.splice(0);
+  Bot.observe(room.memo, evts);
   if (evts.length) io.to('room:' + room.code).emit('events', evts);
 }
 
@@ -198,11 +205,11 @@ function scheduleTurn(room) {
   const turnId = g.current.id;
   if (cur && cur.bot) {
     // Tour d'un robot : il réfléchit un instant puis joue
-    const ms = Math.round(BOT_DELAY_MS * (0.7 + Math.random() * 0.6));
+    const ms = Bot.thinkMs(g.publicState(cur.id), cur.id, cur.bot, BOT_DELAY_MS);
     room.turnDeadline = Date.now() + ms;
     room.timer = setTimeout(() => {
       if (room.game !== g || g.winnerId || g.current.id !== turnId) return;
-      botMove(g, cur);
+      botMove(room, cur);
       afterAction(room);
     }, ms);
     return;
@@ -220,8 +227,9 @@ function scheduleTurn(room) {
 }
 
 // Le robot ne reçoit que sa vue de la partie, comme un joueur humain
-function botMove(g, bot) {
-  const d = Bot.decide(g.publicState(bot.id), bot.id, bot.bot);
+function botMove(room, bot) {
+  const g = room.game;
+  const d = Bot.decide(g.publicState(bot.id), bot.id, bot.bot, Math.random, room.memo);
   const res = d.action === 'play' ? g.play(bot.id, d.cardId, d.suit, d.check) : g.draw(bot.id);
   if (res.error) g.autoMove(bot.id); // filet de sécurité : ne doit jamais arriver
 }
@@ -301,6 +309,18 @@ function removeMember(r, m, reason = 'leave') {
 }
 
 const REACTIONS = ['😂', '🔥', '😤', '👏', '😱', '🙏'];
+// Phrases rapides : liste fixe, pas de texte libre (pas d'insultes possibles)
+const PHRASES = ['Joue vite !', 'Bien joué !', "C'est chaud !", 'Tu vas voir…', 'On dit quoi ?', 'Revanche ?'];
+
+// Nouveau match : les places autour de la table (l'ordre de jeu) sont tirées au hasard
+function shuffleSeats(room) {
+  const m = room.members;
+  for (let i = m.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [m[i], m[j]] = [m[j], m[i]];
+  }
+  if (m.length > 2) io.to('room:' + room.code).emit('events', [{ type: 'seats' }]);
+}
 
 function startRound(room) {
   // Les absents depuis trop longtemps sont retirés entre deux manches
@@ -395,6 +415,12 @@ io.on('connection', (socket) => {
     if (r.members.length >= MAX_PLAYERS) return fail(cb, 'La partie est complète (5 joueurs).');
     leaveCurrent();
     if (!rooms.has(r.code)) return fail(cb, 'Partie introuvable. Vérifie le code.');
+    const m = addNewMember(r, name, token);
+    reply(cb, { ok: true, code: r.code, token: m.token });
+    broadcast(r);
+  });
+
+  function addNewMember(r, name, token) {
     // Jeton expiré (place libérée après une longue absence) : on le réutilise pour le nouveau joueur,
     // ainsi le navigateur qui le renvoie à chaque actualisation retombe toujours sur le même joueur.
     const reuse = typeof token === 'string' && UUID_RE.test(token) && ![...rooms.values()].some((x) => x.members.some((mm) => mm.token === token));
@@ -402,9 +428,36 @@ io.on('connection', (socket) => {
     r.members.push(m);
     attach(r, m);
     log(`${m.name} a rejoint ${r.code}${r.phase === 'playing' ? ' (attend la manche suivante)' : ''}`);
-    reply(cb, { ok: true, code: r.code, token: m.token });
     // Arrivé pendant une manche : il regarde et entre à la manche suivante
     if (r.phase === 'playing') io.to('room:' + r.code).emit('events', [{ type: 'waiting', playerId: m.id, name: m.name }]);
+    return m;
+  }
+
+  // Partie rapide : rejoint une table publique qui attend des joueurs, ou en ouvre une
+  on('quick', ({ name }, cb) => {
+    if (!joinAllowed()) return tooFast(cb);
+    leaveCurrent();
+    let best = null;
+    for (const r of rooms.values()) {
+      if (!r.public || r.phase !== 'lobby' || r.members.length >= MAX_PLAYERS) continue;
+      if (!r.members.some((m) => m.connected && !m.bot)) continue; // personne pour lancer la partie
+      if (!best || r.members.length > best.members.length) best = r;
+    }
+    if (best) {
+      const m = addNewMember(best, name);
+      reply(cb, { ok: true, code: best.code, token: m.token });
+      return broadcast(best);
+    }
+    if (!hit('create:' + ip, 20, 60 * 1000)) return tooFast(cb);
+    const r = createRoom();
+    if (!r) return fail(cb, 'Le serveur est plein pour le moment. Réessaie dans quelques minutes.');
+    r.public = true;
+    const m = { id: crypto.randomUUID(), token: crypto.randomUUID(), name: cleanName(name), wins: 0 };
+    r.members.push(m);
+    r.hostId = m.id;
+    attach(r, m);
+    log(`${r.code} est une partie rapide (publique)`);
+    reply(cb, { ok: true, code: r.code, token: m.token });
     broadcast(r);
   });
 
@@ -427,6 +480,7 @@ io.on('connection', (socket) => {
     if (room.phase === 'matchEnd' || room.phase === 'lobby') {
       room.members.forEach((m) => { m.wins = 0; });
       room.roundsPlayed = 0; room.tiebreak = false; room.matchWinnerId = null; room.lastWinnerId = null;
+      shuffleSeats(room);
     }
     const err = startRound(room);
     reply(cb, err ? { error: err } : { ok: true });
@@ -503,9 +557,9 @@ io.on('connection', (socket) => {
     reply(cb, { ok: true });
   });
 
-  // Réactions rapides (liste fixe d'emojis : pas de texte libre)
+  // Réactions rapides : emojis et phrases d'une liste fixe (pas de texte libre)
   on('react', ({ emoji }, cb) => {
-    if (!room || !member || !REACTIONS.includes(emoji)) return fail(cb, 'Impossible.');
+    if (!room || !member || !(REACTIONS.includes(emoji) || PHRASES.includes(emoji))) return fail(cb, 'Impossible.');
     if (!hit('react:' + socket.id, 3, 3000)) return tooFast(cb, 'Doucement !');
     io.to('room:' + room.code).emit('events', [{ type: 'react', playerId: member.id, emoji }]);
     reply(cb, { ok: true });
@@ -548,6 +602,17 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
+// Redémarrage (mise à jour, mise en veille de Render) : les parties en mémoire vont être perdues.
+// On prévient les joueurs au lieu de les laisser bloqués devant une table figée.
+function notifyRestart() {
+  for (const r of rooms.values()) clearTimeout(r.timer);
+  io.emit('serverRestart');
+  log('redémarrage du serveur : joueurs prévenus');
+}
+
 const PORT = process.env.PORT || 3000;
-if (require.main === module) server.listen(PORT, () => console.log('Serveur sur http://localhost:' + PORT));
-module.exports = { server, rooms };
+if (require.main === module) {
+  server.listen(PORT, () => console.log('Serveur sur http://localhost:' + PORT));
+  process.on('SIGTERM', () => { notifyRestart(); setTimeout(() => process.exit(0), 1000); });
+}
+module.exports = { server, rooms, notifyRestart };

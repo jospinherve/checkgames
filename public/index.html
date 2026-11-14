@@ -14,22 +14,38 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- Réveil du serveur / connexion perdue -->
+  <div id="wake" class="wake hidden" role="status">
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="wakeText">Le serveur se réveille…</span>
+    <button id="btnWakeSolo" class="btn">🤖 Jouer contre les robots en attendant</button>
+  </div>
   <!-- Accueil -->
   <section id="home" class="screen">
     <div class="home-wrap">
       <div class="logo" id="logo"></div>
       <h1>CheckGames</h1>
       <p class="muted">Le jeu de cartes du Cameroun, chacun sur son téléphone.</p>
+      <p id="inviteNote" class="invite hidden"></p>
       <label class="field">Ton pseudo
         <input id="name" maxlength="14" placeholder="Amina" autocomplete="nickname" />
       </label>
       <button id="btnCreate" class="btn primary">Créer une partie</button>
+      <div class="row">
+        <button id="btnQuick" class="btn">⚡ Partie rapide</button>
+        <button id="btnSolo" class="btn">🤖 Contre les robots</button>
+      </div>
+      <p class="muted small center">Partie rapide : une table avec d'autres joueurs en ligne. Contre les robots : marche même sans internet.</p>
       <div class="sep"><span>ou</span></div>
       <label class="field">Code de la partie
         <input id="code" maxlength="4" placeholder="MKBA" autocapitalize="characters" />
       </label>
       <button id="btnJoin" class="btn">Rejoindre</button>
       <p id="homeErr" class="err"></p>
+      <div id="myStats" class="mystats hidden">
+        <div class="mystats-head"><b>Mes statistiques</b><button id="btnResetStats" class="linkbtn">remettre à zéro</button></div>
+        <div id="myStatsBody" class="mystats-body"></div>
+      </div>
       <button id="btnInstall" class="btn ghost hidden">📲 Installer l'appli sur mon téléphone</button>
       <p id="iosHint" class="muted small hidden">Sur iPhone : touche <b>Partager</b> puis <b>Sur l'écran d'accueil</b> pour installer CheckGames.</p>
       <details class="rules">
@@ -44,6 +60,8 @@
           <li>Quand il ne te reste qu'une carte à jouer, dis <b>« Check ! »</b> avant que le suivant joue, sinon tu pioches 1 carte. Avec 2 cartes en main, tu peux appuyer sur « Check » <b>avant</b> de poser ta carte : l'annonce part avec elle.</li>
           <li>Tu as <b>30 secondes</b> par tour. Passé ce délai, tu pioches automatiquement. Un joueur absent plus d'une minute joue automatiquement.</li>
           <li>Banque vide : si une de tes cartes passe, tu dois la poser. Si plus personne ne peut ni jouer ni piocher, celui qui a le moins de cartes gagne la manche.</li>
+          <li>À chaque nouveau match, les places autour de la table (l'ordre de jeu) sont tirées au hasard. Le premier à jouer aussi ; ensuite, le gagnant d'une manche commence la suivante.</li>
+          <li>Robots : <b>facile</b> (oublie souvent « Check »), <b>normal</b>, <b>difficile</b> (n'oublie jamais, retient les couleurs qui te manquent et joue vite quand tu oublies « Check »).</li>
           <li>Couleurs : ♥ macabo rouge, ♣ arachide, ♦ biscuit carré, ♠ macabo noir.</li>
         </ul>
       </details>
@@ -53,17 +71,22 @@
   <!-- Salon -->
   <section id="lobby" class="screen hidden">
     <div class="lobby-wrap">
-      <p class="muted small">Code de la partie</p>
+      <p class="muted small" id="lobbyCodeLabel">Code de la partie</p>
       <div class="bigcode" id="lobbyCode">----</div>
-      <div class="row">
-        <button id="btnShare" class="btn">Partager sur WhatsApp</button>
+      <div class="row" id="shareRow">
+        <button id="btnShare" class="btn">📤 Inviter (WhatsApp…)</button>
         <button id="btnCopy" class="btn">Copier le lien</button>
       </div>
+      <button id="btnNotify" class="btn ghost hidden">🔔 Me prévenir quand c'est mon tour</button>
       <h2>Joueurs <span class="muted" id="playerCount"></span></h2>
       <ul id="lobbyPlayers" class="plist"></ul>
-      <div class="row hidden" id="botRow">
-        <button id="btnBotEasy" class="btn">🤖 Robot facile</button>
-        <button id="btnBotNormal" class="btn">🤖 Robot normal</button>
+      <div class="hidden" id="botRow">
+        <p class="muted small">Ajouter un robot :</p>
+        <div class="row">
+          <button id="btnBotEasy" class="btn">🤖 Facile</button>
+          <button id="btnBotNormal" class="btn">🤖 Normal</button>
+          <button id="btnBotHard" class="btn">🤖 Difficile</button>
+        </div>
       </div>
       <h2>Réglages</h2>
       <div class="settings" id="settings">
@@ -174,6 +197,15 @@
     </div>
   </div>
 
+  <!-- Le serveur redémarre (mise à jour) -->
+  <div id="restartNotice" class="overlay hidden">
+    <div class="sheet">
+      <h2>🔄 Le serveur redémarre</h2>
+      <p class="muted">Une mise à jour est en cours : la partie va s'arrêter. Dans une minute, tu pourras en lancer une nouvelle.</p>
+      <button id="restartOk" class="btn primary">D'accord</button>
+    </div>
+  </div>
+
   <!-- Fin de manche / match -->
   <div id="endModal" class="overlay hidden">
     <div class="sheet">
@@ -189,6 +221,9 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="cards.js"></script>
+  <script src="/lib/game.js"></script>
+  <script src="/lib/bot.js"></script>
+  <script src="local.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
