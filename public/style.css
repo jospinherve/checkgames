@@ -199,3 +199,16 @@ button, .card, .pile { touch-action: manipulation; }
 @media (prefers-reduced-motion: reduce) { .hand .card.in { animation: none; } .spinner { animation: none; } }
 /* Plateau de réactions ouvert : les messages passent en dessous */
 body:has(#reactTray:not(.hidden)) .toasts { top: 250px; }
+
+/* ---------- Main : rangées, carte choisie au premier plan ---------- */
+.hand { flex-direction: column; }
+.hand-row { display: flex; }
+.hand .card { position: relative; }
+/* La carte choisie passe devant ses voisines et se voit en entier */
+.hand .card.sel { z-index: 10; }
+/* Deux rangées : la seconde recouvre le bas de la première (les coins restent lisibles) */
+.hand.two { padding-top: 30px; }
+.hand.two .card { width: 64px; }
+.hand.two .hand-row + .hand-row { margin-top: -46px; }
+.hand.two .card.sel { transform: translateY(-26px) scale(1.06); }
+.sort-btn { font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); background: var(--s2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; cursor: pointer; flex-shrink: 0; }

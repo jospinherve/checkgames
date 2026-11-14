@@ -343,6 +343,29 @@
   };
   $('btnPlay').onclick = () => playSelected();
 
+  // ---------- Rangement de la main ----------
+  // Trié : par couleur (♥ ♣ ♦ ♠, rouges et noires alternées) puis par valeur ; les valets et jokers,
+  // qui se posent presque partout, sont regroupés à droite. Sinon : ordre d'arrivée des cartes.
+  const TWO_ROWS = 10;
+  const SUIT_ORDER = { H: 0, C: 1, D: 2, S: 3 };
+  const RANK_ORDER = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'Q', 'K'];
+  const sortKey = (c) => (c.rank === 'JOKER' ? 600 + (c.color === 'red' ? 0 : 1)
+    : c.rank === 'J' ? 500 + SUIT_ORDER[c.suit]
+      : SUIT_ORDER[c.suit] * 100 + RANK_ORDER.indexOf(c.rank));
+  const sortedHand = (hand) => [...hand].sort((a, b) => sortKey(a) - sortKey(b));
+  let sortHand = store.get('sortHand') !== 'off';
+  function renderSortBtn() {
+    $('btnSort').textContent = sortHand ? '⇅ Triées' : '⇅ Arrivée';
+    $('btnSort').setAttribute('aria-label', sortHand ? 'Cartes triées par couleur. Toucher pour les garder dans l\'ordre d\'arrivée' : 'Cartes dans l\'ordre d\'arrivée. Toucher pour les trier par couleur');
+  }
+  renderSortBtn();
+  $('btnSort').onclick = () => {
+    sortHand = !sortHand;
+    store.set('sortHand', sortHand ? 'on' : 'off');
+    renderSortBtn();
+    if (st && st.game) renderGame();
+  };
+
   function playSelected() {
     if (!myTurn()) return toast("Ce n'est pas ton tour.");
     if (!selected) return toast('Choisis une carte dans ta main.');
@@ -439,19 +462,27 @@
 
     // Main
     if (selected && !g.hand.some((c) => c.id === selected)) selected = null;
-    const n = g.hand.length;
-    const avail = Math.min(window.innerWidth, 520) - 40;
-    const overlap = n > 1 ? Math.max(-56, Math.min(-12, (avail - 72 * n) / (n - 1))) : 0;
-    $('hand').style.setProperty('--overlap', overlap + 'px');
+    const cards = sortHand ? sortedHand(g.hand) : g.hand;
+    const n = cards.length;
+    // Beaucoup de cartes : deux rangées, pour qu'elles restent assez larges pour être touchées
+    const rows = n >= TWO_ROWS ? [cards.slice(0, Math.ceil(n / 2)), cards.slice(Math.ceil(n / 2))] : [cards];
+    $('hand').classList.toggle('two', rows.length === 2);
+    // Place réellement disponible (largeur de la main moins ses marges intérieures)
+    const cs = getComputedStyle($('hand'));
+    const avail = ($('hand').clientWidth || Math.min(window.innerWidth, 520) - 20) - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 2;
+    const cardW = rows.length === 2 ? 64 : 72;
+    const overlapFor = (len) => (len > 1 ? Math.max(-(cardW - 16), Math.min(-12, (avail - cardW * len) / (len - 1))) : 0);
     // Les cartes reçues (distribution ou pioche) glissent depuis la banque
     const dealing = prevHand.size === 0;
     let k = 0;
-    $('hand').innerHTML = g.hand.map((c) => {
+    const cardHtml = (c) => {
       const ok = g.playable.includes(c.id);
       const isNew = !prevHand.has(c.id) && motion;
       const delay = isNew ? ` style="animation-delay:${dealing ? (k++) * 70 : (k++) * 120}ms"` : '';
       return `<div class="card${mine && !ok ? ' dim' : ''}${selected === c.id ? ' sel' : ''}${isNew ? ' in' : ''}" data-id="${c.id}"${delay}>${Cards.svg(c)}</div>`;
-    }).join('');
+    };
+    $('hand').innerHTML = rows.map((row) =>
+      `<div class="hand-row" style="--overlap:${overlapFor(row.length)}px">${row.map(cardHtml).join('')}</div>`).join('');
     prevHand = new Set(g.hand.map((c) => c.id));
     $('hand').querySelectorAll('.card').forEach((el) => {
       el.onclick = () => {
