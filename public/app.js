@@ -59,6 +59,9 @@
 
   // ---------- Utilitaires ----------
   const initials = (n) => n.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+  const BOT_LEVEL = { easy: 'facile', normal: 'normal' };
+  // Avatar : 🤖 pour un robot, sinon les initiales
+  const avatarText = (m) => (m.bot ? '🤖' : initials(m.name));
   const member = (id) => st && st.members.find((m) => m.id === id);
   const nameOf = (id) => (st && id === st.you ? 'Tu' : (member(id) || {}).name || '?');
   const isHost = () => st && st.hostId === st.you;
@@ -144,6 +147,9 @@
     };
   });
   $('sMode').onchange = () => socket.emit('settings', { ...st.settings, mode: $('sMode').value }, () => {});
+  const addBot = (level) => socket.emit('addBot', { level }, (r) => r.error && toast(esc(r.error), 'bad'));
+  $('btnBotEasy').onclick = () => addBot('easy');
+  $('btnBotNormal').onclick = () => addBot('normal');
   $('btnStart').onclick = () => socket.emit('start', {}, (r) => { $('lobbyErr').textContent = r.error || ''; });
   function backHome() {
     clearSession(); st = null; selected = null; lastTopId = null; lastTurnId = null; prevPhase = null;
@@ -192,8 +198,8 @@
     $('lobbyCode').textContent = st.code;
     $('playerCount').textContent = `(${st.members.length}/5)`;
     $('lobbyPlayers').innerHTML = st.members.map((m) => `<li>
-      <div class="avatar${m.connected ? '' : ' away'}">${esc(initials(m.name))}</div>
-      <span>${esc(m.name)}${m.id === st.you ? ' <span class="muted">(toi)</span>' : ''}</span>
+      <div class="avatar${m.connected ? '' : ' away'}${m.bot ? ' bot' : ''}">${esc(avatarText(m))}</div>
+      <span>${esc(m.name)}${m.id === st.you ? ' <span class="muted">(toi)</span>' : ''}${m.bot ? ` <span class="muted small">robot ${BOT_LEVEL[m.bot] || ''}</span>` : ''}</span>
       ${m.id === st.hostId ? '<span class="host">Hôte</span>' : ''}
       ${isHost() && m.id !== st.you ? `<button class="kick" data-kick="${esc(m.id)}" aria-label="Exclure">✕</button>` : ''}</li>`).join('');
     $('lobbyPlayers').querySelectorAll('[data-kick]').forEach((b) => { b.onclick = () => openKick(b.dataset.kick); });
@@ -203,9 +209,10 @@
     $('sTargetLabel').textContent = st.settings.mode === 'wins' ? 'Victoires pour gagner' : 'Nombre de manches';
     $('settings').classList.toggle('readonly', !isHost());
     $('btnStart').classList.toggle('hidden', !isHost());
+    $('botRow').classList.toggle('hidden', !isHost() || st.members.length >= 5);
     $('lobbyHint').textContent = !isHost()
       ? "En attente de l'hôte pour lancer la partie…"
-      : st.members.length < 2 ? 'Il faut au moins 2 joueurs. Partage le code !' : '';
+      : st.members.length < 2 ? 'Il faut au moins 2 joueurs : partage le code ou ajoute un robot !' : '';
     $('btnStart').disabled = st.members.length < 2;
   }
 
@@ -282,7 +289,7 @@
       const cls = ['avatar', g.turnId === id ? 'turn' : '', p.checked ? 'checked' : '', m.connected ? '' : 'away'].join(' ');
       return `<div class="opp${isHost() ? ' kickable' : ''}" data-id="${esc(id)}">
         <span class="score">★ ${m.wins}</span>
-        <div class="${cls}">${esc(initials(m.name))}</div>
+        <div class="${cls}${m.bot ? ' bot' : ''}">${esc(avatarText(m))}</div>
         ${p.checked ? '<span class="ck">CHECK</span>' : ''}
         <span class="name">${esc(m.name)}</span>
         <span class="count"><i></i>${p.count}</span>
@@ -365,7 +372,8 @@
       $('meTimer').textContent = left + 's';
       $('meTimer').classList.toggle('low', left <= 10);
     } else {
-      $('status').textContent = `Au tour de ${nameOf(g.turnId)} · ${left}s`;
+      const cur = member(g.turnId);
+      $('status').textContent = cur && cur.bot ? `${cur.name} réfléchit…` : `Au tour de ${nameOf(g.turnId)} · ${left}s`;
       $('meTimer').textContent = '';
     }
   }

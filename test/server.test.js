@@ -3,6 +3,7 @@
 // bugs corrigés (doublons, fuite de salles), protections de sécurité et fonctions de jeu.
 process.env.TURN_MS = '5000';
 process.env.RECONNECT_MS = '300';
+process.env.BOT_DELAY_MS = '20'; // robots rapides pendant les tests
 const assert = require('assert');
 const { io: Client } = require('socket.io-client');
 const { server, rooms } = require('../server');
@@ -250,6 +251,93 @@ t("« Check » envoyé avec la carte : le serveur l'enregistre", async () => {
   assert.ok(r.ok, r.error);
   assert.ok(cur.checked);
   [host, ...others].forEach((x) => x.close());
+});
+
+// ---------- Robots ----------
+
+t("l'hôte ajoute des robots ; les autres ne peuvent pas ; 5 joueurs maximum", async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'H' });
+  const p = await client();
+  await ask(p, 'join', { code, name: 'P' });
+  assert.match((await ask(p, 'addBot', { level: 'easy' })).error, /hôte/);
+  assert.ok((await ask(host, 'addBot', { level: 'easy' })).ok);
+  assert.ok((await ask(host, 'addBot', { level: 'normal' })).ok);
+  assert.ok((await ask(host, 'addBot', { level: 'normal' })).ok);
+  assert.match((await ask(host, 'addBot', { level: 'normal' })).error, /complète/);
+  assert.ok((await ask(host, 'addBot', { level: 'expert' })).error);
+  await wait(50);
+  const bots = host.state.members.filter((m) => m.bot);
+  assert.deepStrictEqual(bots.map((b) => b.bot), ['easy', 'normal', 'normal']);
+  assert.strictEqual(new Set(host.state.members.map((m) => m.name)).size, 5, 'noms tous différents');
+  [host, p].forEach((c) => c.close());
+});
+
+t('seul contre 2 robots : la partie va jusqu\'au bout', async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'Solo' });
+  await ask(host, 'addBot', { level: 'easy' });
+  await ask(host, 'addBot', { level: 'normal' });
+  await ask(host, 'settings', { handSize: 4, mode: 'wins', target: 2 });
+  assert.ok((await ask(host, 'start')).ok);
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    await wait(80); // rythme humain : sous la limite de 20 messages par seconde
+    const st = host.state;
+    if (st.phase === 'matchEnd') break;
+    if (st.phase === 'roundEnd') { await ask(host, 'start'); continue; }
+    const g = st.game;
+    if (!g || g.turnId !== st.you || g.winnerId) continue;
+    const res = g.playable.length
+      ? await ask(host, 'play', { cardId: g.playable[0], suit: 'H', check: g.hand.length === 2 })
+      : await ask(host, 'draw');
+    assert.ok(res.ok || /pas ton tour|termin/.test(res.error), res.error);
+  }
+  assert.strictEqual(host.state.phase, 'matchEnd');
+  const wins = host.state.members.reduce((a, m) => a + m.wins, 0);
+  assert.ok(wins >= 2);
+  assert.ok(host.events.some((e) => e.type === 'play' && host.state.members.find((m) => m.id === e.playerId && m.bot)), 'les robots ont joué');
+  host.close();
+  await wait(50);
+  assert.ok(rooms.has(code));
+});
+
+t('le dernier humain part : la partie des robots est fermée', async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'H' });
+  await ask(host, 'addBot', { level: 'normal' });
+  await ask(host, 'addBot', { level: 'normal' });
+  await ask(host, 'start');
+  await ask(host, 'leave');
+  await wait(100);
+  assert.ok(!rooms.has(code));
+  host.close();
+});
+
+t('un robot ne devient jamais hôte, et ne compte pas comme joueur connecté', async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'H' });
+  await ask(host, 'addBot', { level: 'easy' });
+  const p = await client();
+  await ask(p, 'join', { code, name: 'P' });
+  const s = await (await fetch(url + '/stats.json')).json();
+  assert.ok(s.bots >= 1);
+  await ask(host, 'leave');
+  await wait(50);
+  const r = rooms.get(code);
+  assert.strictEqual(r.members.find((m) => m.id === r.hostId).name, 'P');
+  [host, p].forEach((c) => c.close());
+});
+
+t("l'hôte peut retirer un robot", async () => {
+  const host = await client();
+  const { code } = await ask(host, 'create', { name: 'H' });
+  await ask(host, 'addBot', { level: 'easy' });
+  await wait(30);
+  const bot = host.state.members.find((m) => m.bot);
+  assert.ok((await ask(host, 'kick', { id: bot.id })).ok);
+  assert.deepStrictEqual(names(code), ['H']);
+  host.close();
 });
 
 // ---------- Appli installable ----------

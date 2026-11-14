@@ -164,3 +164,7 @@ input:focus, select:focus { border-color: var(--accent); }
 .btn.check.announce.armed { background: var(--green); border-style: solid; color: #062b16; }
 /* Zoom autorisé, mais pas de double-tap qui zoome par accident sur les boutons et les cartes */
 button, .card, .pile { touch-action: manipulation; }
+
+/* Robots */
+.avatar.bot { background: var(--accent-d); font-size: 22px; }
+#botRow .btn { font-size: 14px; }

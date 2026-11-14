@@ -8,7 +8,7 @@ async function refresh() {
   try {
     const r = await fetch('/stats.json', { cache: 'no-store' });
     const d = await r.json();
-    for (const k of ['connected', 'rooms', 'playing', 'players']) $(k).textContent = d[k];
+    for (const k of ['connected', 'rooms', 'playing', 'players', 'bots']) $(k).textContent = d[k];
     $('uptime').textContent = `Serveur démarré il y a ${dur(d.uptime)}`;
     $('status').textContent = 'En direct · mis à jour à ' + new Date().toLocaleTimeString('fr-FR');
     $('dot').className = 'dot';

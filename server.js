@@ -5,11 +5,14 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const { Game, SUITS, MAX_PLAYERS, MIN_HAND, MAX_HAND } = require('./game');
+const Bot = require('./bot');
 
 const TURN_MS = Number(process.env.TURN_MS || 30000);
 const RECONNECT_MS = Number(process.env.RECONNECT_MS || 60000);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_ROOMS = Number(process.env.MAX_ROOMS || 2000);
+// Temps de réflexion des robots (pour paraître naturels)
+const BOT_DELAY_MS = Number(process.env.BOT_DELAY_MS || 1200);
 const EVENTS_PER_SEC = Number(process.env.EVENTS_PER_SEC || 20); // limite par connexion
 
 const app = express();
@@ -44,13 +47,16 @@ app.get('/health', (_req, res) => res.send('ok'));
 // ---------- Statistiques en direct ----------
 // Uniquement des chiffres : ni noms, ni codes de partie.
 function stats() {
-  let players = 0, connected = 0, playing = 0;
+  let players = 0, connected = 0, playing = 0, bots = 0;
   for (const r of rooms.values()) {
-    players += r.members.length;
-    connected += r.members.filter((m) => m.connected).length;
+    for (const m of r.members) {
+      if (m.bot) { bots++; continue; }
+      players++;
+      if (m.connected) connected++;
+    }
     if (r.phase === 'playing') playing++;
   }
-  return { rooms: rooms.size, playing, players, connected, uptime: Math.round(process.uptime()) };
+  return { rooms: rooms.size, playing, players, connected, bots, uptime: Math.round(process.uptime()) };
 }
 app.get('/stats.json', (_req, res) => { res.set('Cache-Control', 'no-store'); res.json(stats()); });
 app.get('/stats', (_req, res) => res.sendFile(path.join(__dirname, 'stats.html')));
@@ -142,8 +148,9 @@ function createRoom() {
 
 function ensureHost(room) {
   const host = room.members.find((m) => m.id === room.hostId);
-  if (host && host.connected) return;
-  const next = room.members.find((m) => m.connected) || room.members[0];
+  if (host && host.connected && !host.bot) return;
+  // Un robot n'est jamais hôte
+  const next = room.members.find((m) => m.connected && !m.bot) || room.members.find((m) => !m.bot);
   if (next) room.hostId = next.id;
 }
 
@@ -164,7 +171,7 @@ function viewFor(room, member) {
     members: room.members.map((m) => {
       const gp = gs && gs.players.find((p) => p.id === m.id);
       return {
-        id: m.id, name: m.name, wins: m.wins, connected: m.connected,
+        id: m.id, name: m.name, wins: m.wins, connected: m.connected, bot: m.bot || null,
         inGame: !!gp, count: gp ? gp.count : 0, checked: gp ? gp.checked : false,
       };
     }),
@@ -188,10 +195,21 @@ function scheduleTurn(room) {
   const g = room.game;
   if (!g || room.phase !== 'playing' || g.winnerId) { room.turnDeadline = 0; return; }
   const cur = room.members.find((m) => m.id === g.current.id);
+  const turnId = g.current.id;
+  if (cur && cur.bot) {
+    // Tour d'un robot : il réfléchit un instant puis joue
+    const ms = Math.round(BOT_DELAY_MS * (0.7 + Math.random() * 0.6));
+    room.turnDeadline = Date.now() + ms;
+    room.timer = setTimeout(() => {
+      if (room.game !== g || g.winnerId || g.current.id !== turnId) return;
+      botMove(g, cur);
+      afterAction(room);
+    }, ms);
+    return;
+  }
   const away = cur && !cur.connected && Date.now() - cur.disconnectedAt >= RECONNECT_MS;
   const ms = away ? 2500 : TURN_MS;
   room.turnDeadline = Date.now() + ms;
-  const turnId = g.current.id;
   const evCount = g.events.length;
   room.timer = setTimeout(() => {
     if (room.game !== g || g.winnerId || g.current.id !== turnId) return;
@@ -199,6 +217,13 @@ function scheduleTurn(room) {
     g.events.splice(evCount, 0, { type: 'timeout', playerId: turnId });
     afterAction(room);
   }, ms);
+}
+
+// Le robot ne reçoit que sa vue de la partie, comme un joueur humain
+function botMove(g, bot) {
+  const d = Bot.decide(g.publicState(bot.id), bot.id, bot.bot);
+  const res = d.action === 'play' ? g.play(bot.id, d.cardId, d.suit, d.check) : g.draw(bot.id);
+  if (res.error) g.autoMove(bot.id); // filet de sécurité : ne doit jamais arriver
 }
 
 function afterAction(room) {
@@ -251,6 +276,8 @@ function removeMember(r, m, reason = 'leave') {
   if (!r.members.includes(m)) return;
   r.members = r.members.filter((x) => x !== m);
   log(`${m.name} ${LEAVE_LOG[reason]} ${r.code}${reason === 'away' ? ' (absent trop longtemps)' : ''}`);
+  // Plus aucun humain : les robots ne jouent pas entre eux, la partie est fermée
+  if (!r.members.some((x) => !x.bot)) r.members = [];
   ensureHost(r);
   if (r.members.length === 0) { clearTimeout(r.timer); rooms.delete(r.code); log(`partie ${r.code} fermée (vide)`); return; }
   const type = reason === 'kick' ? 'playerKicked' : 'playerLeft';
@@ -445,6 +472,25 @@ io.on('connection', (socket) => {
     if (res.ok) { flushEvents(room); broadcast(room); }
   });
 
+  // L'hôte ajoute un robot (facile ou normal). Arrivé pendant une manche, il joue la suivante.
+  on('addBot', ({ level }, cb) => {
+    if (!room || room.hostId !== member.id) return fail(cb, "Seul l'hôte peut ajouter un robot.");
+    if (!Bot.LEVELS.includes(level)) return fail(cb, 'Niveau inconnu.');
+    if (room.members.length >= MAX_PLAYERS) return fail(cb, 'La partie est complète (5 joueurs).');
+    const used = new Set(room.members.map((m) => m.name));
+    const free = Bot.BOT_NAMES.filter((n) => !used.has(n));
+    const pick = free.length ? free[Math.floor(Math.random() * free.length)] : 'Robot';
+    const bot = {
+      id: crypto.randomUUID(), token: crypto.randomUUID(), name: uniqueName(room, pick), wins: 0,
+      bot: level, connected: true, socketId: null, disconnectedAt: 0,
+    };
+    room.members.push(bot);
+    log(`robot ${bot.name} (${level}) ajouté à ${room.code}`);
+    if (room.phase === 'playing') io.to('room:' + room.code).emit('events', [{ type: 'waiting', playerId: bot.id, name: bot.name }]);
+    reply(cb, { ok: true });
+    broadcast(room);
+  });
+
   // L'hôte exclut un joueur (absent ou gênant). Il ne peut pas revenir avec la même session.
   on('kick', ({ id }, cb) => {
     if (!room || room.hostId !== member.id) return fail(cb, "Seul l'hôte peut exclure un joueur.");
@@ -497,7 +543,7 @@ io.on('connection', (socket) => {
 setInterval(() => {
   const now = Date.now();
   for (const [code, r] of rooms) {
-    const anyone = r.members.some((m) => m.connected);
+    const anyone = r.members.some((m) => m.connected && !m.bot);
     if (!anyone && now - r.lastSeen > 30 * 60 * 1000) { clearTimeout(r.timer); rooms.delete(code); log(`partie ${code} fermée (abandonnée)`); }
   }
 }, 5 * 60 * 1000).unref();
