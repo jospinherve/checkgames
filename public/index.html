@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#1d1d1b" />
+  <title>CheckGames — le jeu de cartes du Cameroun</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Accueil -->
+  <section id="home" class="screen">
+    <div class="home-wrap">
+      <div class="logo" id="logo"></div>
+      <h1>CheckGames</h1>
+      <p class="muted">Le jeu de cartes du Cameroun, chacun sur son téléphone.</p>
+      <label class="field">Ton pseudo
+        <input id="name" maxlength="14" placeholder="Amina" autocomplete="nickname" />
+      </label>
+      <button id="btnCreate" class="btn primary">Créer une partie</button>
+      <div class="sep"><span>ou</span></div>
+      <label class="field">Code de la partie
+        <input id="code" maxlength="4" placeholder="MKBA" autocapitalize="characters" />
+      </label>
+      <button id="btnJoin" class="btn">Rejoindre</button>
+      <p id="homeErr" class="err"></p>
+      <details class="rules">
+        <summary>Les règles</summary>
+        <ul>
+          <li>Pose une carte de même couleur ou de même valeur. Sinon, pioche : à ton tour, tu joues <b>ou</b> tu pioches.</li>
+          <li><b>7</b> : le suivant pioche 2. <b>Joker</b> : le suivant pioche 4. Les pénalités s'additionnent si on répond avec un 7 ou un joker (n'importe quel 7 répond à un joker et inversement).</li>
+          <li>Le joker se pose sur sa couleur (rouge sur rouge, noir sur noir) ou sur n'importe quel autre joker.</li>
+          <li><b>As</b> : le suivant saute son tour. À 2 joueurs, on rejoue, mais on ne peut pas finir sur un as.</li>
+          <li><b>J</b> : se pose sur tout (sauf pour répondre à un 7 ou un joker) et commande une couleur.</li>
+          <li>Quand il ne te reste qu'une carte à jouer, dis <b>« Check ! »</b> avant que le suivant joue, sinon tu pioches 1 carte.</li>
+          <li>Couleurs : ♥ macabo rouge, ♣ arachide, ♦ biscuit carré, ♠ macabo noir.</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <!-- Salon -->
+  <section id="lobby" class="screen hidden">
+    <div class="lobby-wrap">
+      <p class="muted small">Code de la partie</p>
+      <div class="bigcode" id="lobbyCode">----</div>
+      <div class="row">
+        <button id="btnShare" class="btn">Partager sur WhatsApp</button>
+        <button id="btnCopy" class="btn">Copier le lien</button>
+      </div>
+      <h2>Joueurs <span class="muted" id="playerCount"></span></h2>
+      <ul id="lobbyPlayers" class="plist"></ul>
+      <h2>Réglages</h2>
+      <div class="settings" id="settings">
+        <div class="set-row">
+          <span>Cartes par joueur</span>
+          <div class="stepper"><button data-step="handSize" data-d="-1" aria-label="Moins">−</button><b id="sHand">5</b><button data-step="handSize" data-d="1" aria-label="Plus">+</button></div>
+        </div>
+        <div class="set-row">
+          <span>Fin du match</span>
+          <select id="sMode">
+            <option value="wins">Premier à X victoires</option>
+            <option value="rounds">Nombre de manches</option>
+          </select>
+        </div>
+        <div class="set-row">
+          <span id="sTargetLabel">Victoires pour gagner</span>
+          <div class="stepper"><button data-step="target" data-d="-1" aria-label="Moins">−</button><b id="sTarget">3</b><button data-step="target" data-d="1" aria-label="Plus">+</button></div>
+        </div>
+      </div>
+      <p id="lobbyHint" class="muted small"></p>
+      <button id="btnStart" class="btn primary">Lancer la partie</button>
+      <button id="btnLeave" class="btn ghost">Quitter</button>
+      <p id="lobbyErr" class="err"></p>
+    </div>
+  </section>
+
+  <!-- Table de jeu -->
+  <section id="game" class="screen hidden">
+    <header class="topbar">
+      <span class="tag" id="gCode">----</span>
+      <span class="muted small" id="gRound"></span>
+      <div class="top-actions">
+        <button id="btnSound" class="icon-btn" aria-label="Son">🔊</button>
+        <button id="btnRestart" class="quit-btn hidden" aria-label="Recommencer la manche">↻</button>
+        <button id="btnQuit" class="quit-btn">Quitter</button>
+      </div>
+    </header>
+    <div class="opponents" id="opponents"></div>
+    <div class="table">
+      <div class="badges">
+        <span id="bPenalty" class="badge danger hidden"></span>
+        <span id="bCommand" class="badge hidden"></span>
+      </div>
+      <div class="piles">
+        <button class="pile" id="drawPile" aria-label="Piocher">
+          <div class="card big" id="backCard"></div>
+          <span class="pile-count" id="deckCount"></span>
+        </button>
+        <div class="pile"><div class="card big" id="topCard"></div></div>
+      </div>
+      <p class="status" id="status"></p>
+    </div>
+    <div class="me">
+      <div class="me-head">
+        <div class="avatar" id="meAvatar"></div>
+        <div class="me-info"><b id="meName"></b><span class="muted small" id="meScore"></span></div>
+        <div class="me-timer" id="meTimer"></div>
+      </div>
+      <div class="actions">
+        <button id="btnDraw" class="btn">Piocher</button>
+        <button id="btnCheck" class="btn check hidden">Check !</button>
+        <button id="btnPlay" class="btn primary">Jouer</button>
+      </div>
+      <div class="hand" id="hand"></div>
+    </div>
+    <div id="toasts" class="toasts"></div>
+  </section>
+
+  <!-- Choix de la couleur (J) -->
+  <div id="suitModal" class="overlay hidden">
+    <div class="sheet">
+      <h2>Quelle couleur tu commandes ?</h2>
+      <div class="suits" id="suitButtons"></div>
+      <button class="btn ghost" id="suitCancel">Annuler</button>
+    </div>
+  </div>
+
+  <!-- Confirmation pour quitter -->
+  <div id="quitModal" class="overlay hidden">
+    <div class="sheet">
+      <h2>Quitter la partie ?</h2>
+      <p class="muted">Tes cartes seront remises dans la banque et la partie continue sans toi.</p>
+      <button id="quitYes" class="btn danger">Quitter</button>
+      <button id="quitNo" class="btn ghost">Rester</button>
+    </div>
+  </div>
+
+  <!-- Confirmation pour recommencer la manche -->
+  <div id="restartModal" class="overlay hidden">
+    <div class="sheet">
+      <h2>Recommencer la manche ?</h2>
+      <p class="muted">Les cartes sont redistribuées pour tout le monde. Les scores ne changent pas.</p>
+      <button id="restartYes" class="btn primary">Recommencer</button>
+      <button id="restartNo" class="btn ghost">Annuler</button>
+    </div>
+  </div>
+
+  <!-- Fin de manche / match -->
+  <div id="endModal" class="overlay hidden">
+    <div class="sheet">
+      <h2 id="endTitle"></h2>
+      <p class="muted" id="endSub"></p>
+      <ol id="endScores" class="scores"></ol>
+      <button id="btnNext" class="btn primary"></button>
+      <button id="btnLobby" class="btn hidden">Retour au salon</button>
+      <button id="btnEndQuit" class="btn ghost">Quitter la partie</button>
+      <p class="muted small" id="endWait"></p>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="cards.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
