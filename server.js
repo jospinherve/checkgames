@@ -14,6 +14,20 @@ const MAX_ROOMS = Number(process.env.MAX_ROOMS || 2000);
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => res.send('ok'));
+
+// ---------- Statistiques en direct ----------
+// Uniquement des chiffres : ni noms, ni codes de partie.
+function stats() {
+  let players = 0, connected = 0, playing = 0;
+  for (const r of rooms.values()) {
+    players += r.members.length;
+    connected += r.members.filter((m) => m.connected).length;
+    if (r.phase === 'playing') playing++;
+  }
+  return { rooms: rooms.size, playing, players, connected, uptime: Math.round(process.uptime()) };
+}
+app.get('/stats.json', (_req, res) => { res.set('Cache-Control', 'no-store'); res.json(stats()); });
+app.get('/stats', (_req, res) => res.sendFile(path.join(__dirname, 'stats.html')));
 const server = http.createServer(app);
 const io = new Server(server, { pingInterval: 10000, pingTimeout: 8000 });
 
@@ -29,7 +43,10 @@ function makeCode() {
   return null;
 }
 
-function cleanName(n) { return String(n || '').trim().slice(0, 14) || 'Joueur'; }
+// Retire les caractères de contrôle (retours à la ligne…) : un nom ne peut pas fabriquer de fausses lignes de log
+function cleanName(n) { return String(n || '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '').trim().slice(0, 14) || 'Joueur'; }
+
+function log(msg) { console.log(msg); }
 
 function sanitizeSettings(s, prev) {
   const out = { ...prev };
@@ -59,6 +76,7 @@ function createRoom() {
     lastSeen: Date.now(),
   };
   rooms.set(room.code, room);
+  log(`partie ${room.code} créée`);
   return room;
 }
 
@@ -130,10 +148,14 @@ function afterAction(room) {
     clearTimeout(room.timer);
     room.turnDeadline = 0;
     const w = room.members.find((m) => m.id === g.winnerId);
-    if (w) w.wins++;
+    if (w) { w.wins++; log(`${room.code} : manche gagnée par ${w.name}`); }
     room.roundsPlayed++;
     room.lastWinnerId = g.winnerId;
     room.phase = isMatchOver(room) ? 'matchEnd' : 'roundEnd';
+    if (room.phase === 'matchEnd') {
+      const mw = room.members.find((m) => m.id === room.matchWinnerId);
+      if (mw) log(`${room.code} : match gagné par ${mw.name}`);
+    }
   } else {
     scheduleTurn(room);
   }
@@ -155,7 +177,11 @@ function isMatchOver(room) {
 
 function startRound(room) {
   // Les absents depuis trop longtemps sont retirés entre deux manches
-  room.members = room.members.filter((m) => m.connected || Date.now() - m.disconnectedAt < RECONNECT_MS);
+  room.members = room.members.filter((m) => {
+    const keep = m.connected || Date.now() - m.disconnectedAt < RECONNECT_MS;
+    if (!keep) log(`${m.name} a quitté ${room.code} (absent trop longtemps)`);
+    return keep;
+  });
   ensureHost(room);
   if (room.members.length < 2) return 'Il faut au moins 2 joueurs.';
   const starterId = room.members.some((m) => m.id === room.lastWinnerId) ? room.lastWinnerId : null;
@@ -191,8 +217,9 @@ io.on('connection', (socket) => {
     r.members = r.members.filter((x) => x !== m);
     socket.leave('room:' + r.code);
     room = null; member = null;
+    log(`${m.name} a quitté ${r.code}`);
     ensureHost(r);
-    if (r.members.length === 0) { clearTimeout(r.timer); rooms.delete(r.code); return; }
+    if (r.members.length === 0) { clearTimeout(r.timer); rooms.delete(r.code); log(`partie ${r.code} fermée (vide)`); return; }
     if (r.phase === 'playing' && r.game) {
       r.game.removePlayer(m.id);
       if (r.game.players.length < 2) {
@@ -232,6 +259,7 @@ io.on('connection', (socket) => {
     if (existing) {
       if (member !== existing) leaveCurrent();
       attach(r, existing);
+      log(`${existing.name} est revenu dans ${r.code}`);
       reply(cb, { ok: true, code: r.code, token: existing.token, rejoined: true });
       if (r.phase === 'playing') scheduleTurnIfAway(r);
       return broadcast(r);
@@ -246,6 +274,7 @@ io.on('connection', (socket) => {
     const m = { id: crypto.randomUUID(), token: reuse ? token : crypto.randomUUID(), name: cleanName(name), wins: 0 };
     r.members.push(m);
     attach(r, m);
+    log(`${m.name} a rejoint ${r.code}`);
     reply(cb, { ok: true, code: r.code, token: m.token });
     broadcast(r);
   });
@@ -330,7 +359,8 @@ io.on('connection', (socket) => {
     // Après 60 s d'absence, ses tours sont joués automatiquement
     setTimeout(() => {
       if (!m.connected && r.phase === 'playing' && r.game && r.game.current.id === m.id) scheduleTurn(r);
-      if (!m.connected && r.phase !== 'playing') {
+      if (!m.connected && r.phase !== 'playing' && r.members.includes(m)) {
+        log(`${m.name} a quitté ${r.code} (absent trop longtemps)`);
         r.members = r.members.filter((x) => x !== m);
         ensureHost(r);
         broadcast(r);
@@ -344,7 +374,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [code, r] of rooms) {
     const anyone = r.members.some((m) => m.connected);
-    if (!anyone && now - r.lastSeen > 30 * 60 * 1000) { clearTimeout(r.timer); rooms.delete(code); }
+    if (!anyone && now - r.lastSeen > 30 * 60 * 1000) { clearTimeout(r.timer); rooms.delete(code); log(`partie ${code} fermée (abandonnée)`); }
   }
 }, 5 * 60 * 1000).unref();
 
