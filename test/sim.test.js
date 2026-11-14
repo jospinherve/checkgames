@@ -2,6 +2,7 @@
 // Simule des matchs complets avec de vrais clients Socket.io
 process.env.TURN_MS = '400';
 process.env.RECONNECT_MS = '300';
+process.env.EVENTS_PER_SEC = '100000'; // les robots jouent bien plus vite qu'un humain
 const { io: Client } = require('socket.io-client');
 const { server } = require('../server');
 

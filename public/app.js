@@ -111,17 +111,19 @@
     });
   };
 
-  socket.on('connect', () => {
+  function resume() {
     const s = session();
-    if (s) {
-      socket.emit('join', { code: s.code, token: s.token, name: store.get('name') }, (res) => {
-        if (res.error) { clearSession(); show('home'); return; }
-        // Le serveur peut nous avoir recréé comme nouveau joueur (ancienne place expirée) :
-        // on garde toujours le jeton renvoyé, sinon chaque actualisation ajouterait un doublon.
-        saveSession({ code: res.code, token: res.token });
-      });
-    }
-  });
+    if (!s || !socket.connected) return;
+    socket.emit('join', { code: s.code, token: s.token, name: store.get('name') }, (res) => {
+      // Refus temporaire (trop de tentatives) : on garde la session et on réessaie
+      if (res.error && res.retry) { toast(res.error, 'bad'); setTimeout(resume, 5000); return; }
+      if (res.error) { clearSession(); show('home'); return; }
+      // Le serveur peut nous avoir recréé comme nouveau joueur (ancienne place expirée) :
+      // on garde toujours le jeton renvoyé, sinon chaque actualisation ajouterait un doublon.
+      saveSession({ code: res.code, token: res.token });
+    });
+  }
+  socket.on('connect', resume);
   socket.on('disconnect', () => toast('Connexion perdue… reconnexion en cours', 'bad'));
 
   // ---------- Salon ----------

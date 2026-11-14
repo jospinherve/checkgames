@@ -10,8 +10,34 @@ const TURN_MS = Number(process.env.TURN_MS || 30000);
 const RECONNECT_MS = Number(process.env.RECONNECT_MS || 60000);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_ROOMS = Number(process.env.MAX_ROOMS || 2000);
+const EVENTS_PER_SEC = Number(process.env.EVENTS_PER_SEC || 20); // limite par connexion
 
 const app = express();
+app.disable('x-powered-by');
+
+// ---------- En-têtes de sécurité ----------
+app.use((req, res, next) => {
+  const host = String(req.headers.host || '').replace(/[^a-zA-Z0-9.:-]/g, '');
+  res.set({
+    'Content-Security-Policy': [
+      "default-src 'self'",
+      "script-src 'self'",              // aucun script en ligne ni externe
+      "style-src 'self' 'unsafe-inline'", // une icône SVG utilise un attribut style
+      "img-src 'self' data:",
+      `connect-src 'self' wss://${host} ws://${host}`,
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+    ].join('; '),
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  });
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => res.send('ok'));
 
@@ -29,7 +55,29 @@ function stats() {
 app.get('/stats.json', (_req, res) => { res.set('Cache-Control', 'no-store'); res.json(stats()); });
 app.get('/stats', (_req, res) => res.sendFile(path.join(__dirname, 'stats.html')));
 const server = http.createServer(app);
-const io = new Server(server, { pingInterval: 10000, pingTimeout: 8000 });
+// Les messages du jeu font quelques centaines d'octets : 10 Ko suffisent largement
+const io = new Server(server, { pingInterval: 10000, pingTimeout: 8000, maxHttpBufferSize: 10_000 });
+
+// ---------- Limites de fréquence ----------
+// Compteurs sur une fenêtre fixe : hit() renvoie false quand la limite est dépassée.
+const counters = new Map();
+function hit(key, limit, windowMs) {
+  const now = Date.now();
+  let c = counters.get(key);
+  if (!c || now >= c.reset) { c = { n: 0, reset: now + windowMs }; counters.set(key, c); }
+  return ++c.n <= limit;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, c] of counters) if (now >= c.reset) counters.delete(k);
+}, 60 * 1000).unref();
+
+// Derrière Render, la vraie adresse du joueur est dans X-Forwarded-For
+function clientIp(socket) {
+  const xff = String(socket.handshake.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xff || socket.handshake.address;
+}
+const TOO_FAST = 'Trop de tentatives. Attends une minute et réessaie.';
 
 const rooms = new Map();
 
@@ -198,10 +246,20 @@ io.on('connection', (socket) => {
   let room = null;
   let member = null;
 
+  const ip = clientIp(socket);
   const reply = (cb, payload) => { if (typeof cb === 'function') cb(payload); };
-  // accepte socket.emit('x', cb) comme socket.emit('x', data, cb)
-  const on = (ev, fn) => socket.on(ev, (d, cb) => (typeof d === 'function' ? fn({}, d) : fn(d || {}, cb)));
   const fail = (cb, error) => reply(cb, { error });
+  // accepte socket.emit('x', cb) comme socket.emit('x', data, cb)
+  // Au-delà de EVENTS_PER_SEC messages par seconde sur une connexion, les messages sont refusés
+  const on = (ev, fn) => socket.on(ev, (d, cb) => {
+    if (typeof d === 'function') { cb = d; d = {}; }
+    if (!hit('sock:' + socket.id, EVENTS_PER_SEC, 1000)) return tooFast(cb, 'Doucement !');
+    fn(d && typeof d === 'object' ? d : {}, cb);
+  });
+  // Refus temporaire : le client garde sa session et réessaie
+  const tooFast = (cb, error = TOO_FAST) => reply(cb, { error, retry: true });
+  // Créer / rejoindre : 10 fois par minute et par connexion
+  const joinAllowed = () => hit('join:' + socket.id, 10, 60 * 1000);
 
   function attach(r, m) {
     room = r; member = m;
@@ -241,6 +299,7 @@ io.on('connection', (socket) => {
   }
 
   on('create', ({ name }, cb) => {
+    if (!joinAllowed() || !hit('create:' + ip, 20, 60 * 1000)) return tooFast(cb);
     leaveCurrent();
     const r = createRoom();
     if (!r) return fail(cb, 'Le serveur est plein pour le moment. Réessaie dans quelques minutes.');
@@ -253,8 +312,13 @@ io.on('connection', (socket) => {
   });
 
   on('join', ({ code, name, token }, cb) => {
+    if (!joinAllowed()) return tooFast(cb);
+    // Essais de codes au hasard : au plus 20 codes inexistants par minute et par adresse IP
+    const failKey = 'badcode:' + ip;
+    const f = counters.get(failKey);
+    if (f && Date.now() < f.reset && f.n >= 20) return tooFast(cb);
     const r = rooms.get(String(code || '').toUpperCase().trim());
-    if (!r) return fail(cb, 'Partie introuvable. Vérifie le code.');
+    if (!r) { hit(failKey, 20, 60 * 1000); return fail(cb, 'Partie introuvable. Vérifie le code.'); }
     const existing = token && r.members.find((m) => m.token === token);
     if (existing) {
       if (member !== existing) leaveCurrent();
