@@ -8,6 +8,7 @@ const { Game, SUITS, MAX_PLAYERS, MIN_HAND, MAX_HAND } = require('./game');
 
 const TURN_MS = Number(process.env.TURN_MS || 30000);
 const RECONNECT_MS = Number(process.env.RECONNECT_MS || 60000);
+const MAX_ROOMS = Number(process.env.MAX_ROOMS || 2000);
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -19,10 +20,12 @@ const rooms = new Map();
 
 function makeCode() {
   const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-  let code;
-  do { code = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join(''); }
-  while (rooms.has(code));
-  return code;
+  // Nombre d'essais borné : jamais de boucle infinie, même si les codes viennent à manquer
+  for (let i = 0; i < 100; i++) {
+    const code = Array.from({ length: 4 }, () => letters[crypto.randomInt(letters.length)]).join('');
+    if (!rooms.has(code)) return code;
+  }
+  return null;
 }
 
 function cleanName(n) { return String(n || '').trim().slice(0, 14) || 'Joueur'; }
@@ -36,8 +39,11 @@ function sanitizeSettings(s, prev) {
 }
 
 function createRoom() {
+  if (rooms.size >= MAX_ROOMS) return null;
+  const code = makeCode();
+  if (!code) return null;
   const room = {
-    code: makeCode(),
+    code,
     hostId: null,
     members: [], // {id, token, name, socketId, connected, disconnectedAt, wins}
     phase: 'lobby',
@@ -177,8 +183,39 @@ io.on('connection', (socket) => {
     ensureHost(r);
   }
 
+  // Quitte proprement la partie actuelle de ce socket (aucun joueur fantôme laissé derrière)
+  function leaveCurrent() {
+    if (!room || !member) return;
+    const r = room, m = member;
+    r.members = r.members.filter((x) => x !== m);
+    socket.leave('room:' + r.code);
+    room = null; member = null;
+    ensureHost(r);
+    if (r.members.length === 0) { clearTimeout(r.timer); rooms.delete(r.code); return; }
+    if (r.phase === 'playing' && r.game) {
+      r.game.removePlayer(m.id);
+      if (r.game.players.length < 2) {
+        // Plus assez de joueurs : retour au salon
+        flushEvents(r);
+        clearTimeout(r.timer);
+        r.phase = 'lobby'; r.game = null; r.turnDeadline = 0;
+        r.members.forEach((x) => { x.wins = 0; });
+        r.roundsPlayed = 0; r.matchWinnerId = null; r.tiebreak = false;
+        io.to('room:' + r.code).emit('events', [{ type: 'notEnough' }]);
+        broadcast(r);
+      } else {
+        afterAction(r);
+      }
+    } else {
+      io.to('room:' + r.code).emit('events', [{ type: 'playerLeft', playerId: m.id, name: m.name }]);
+      broadcast(r);
+    }
+  }
+
   on('create', ({ name }, cb) => {
+    leaveCurrent();
     const r = createRoom();
+    if (!r) return fail(cb, 'Le serveur est plein pour le moment. Réessaie dans quelques minutes.');
     const m = { id: crypto.randomUUID(), token: crypto.randomUUID(), name: cleanName(name), wins: 0 };
     r.members.push(m);
     r.hostId = m.id;
@@ -192,6 +229,7 @@ io.on('connection', (socket) => {
     if (!r) return fail(cb, 'Partie introuvable. Vérifie le code.');
     const existing = token && r.members.find((m) => m.token === token);
     if (existing) {
+      if (member !== existing) leaveCurrent();
       attach(r, existing);
       reply(cb, { ok: true, code: r.code, token: existing.token, rejoined: true });
       if (r.phase === 'playing') scheduleTurnIfAway(r);
@@ -199,6 +237,8 @@ io.on('connection', (socket) => {
     }
     if (r.phase === 'playing') return fail(cb, 'Une manche est en cours. Réessaie à la fin de la manche.');
     if (r.members.length >= MAX_PLAYERS) return fail(cb, 'La partie est complète (5 joueurs).');
+    leaveCurrent();
+    if (!rooms.has(r.code)) return fail(cb, 'Partie introuvable. Vérifie le code.');
     const m = { id: crypto.randomUUID(), token: crypto.randomUUID(), name: cleanName(name), wins: 0 };
     r.members.push(m);
     attach(r, m);
@@ -271,31 +311,7 @@ io.on('connection', (socket) => {
 
   // Quitter la partie (dans le salon comme en pleine manche)
   on('leave', (_d, cb) => {
-    if (!room || !member) return reply(cb, { ok: true });
-    const r = room, m = member;
-    r.members = r.members.filter((x) => x !== m);
-    socket.leave('room:' + r.code);
-    room = null; member = null;
-    ensureHost(r);
-    if (r.members.length === 0) { clearTimeout(r.timer); rooms.delete(r.code); return reply(cb, { ok: true }); }
-    if (r.phase === 'playing' && r.game) {
-      r.game.removePlayer(m.id);
-      if (r.game.players.length < 2) {
-        // Plus assez de joueurs : retour au salon
-        flushEvents(r);
-        clearTimeout(r.timer);
-        r.phase = 'lobby'; r.game = null; r.turnDeadline = 0;
-        r.members.forEach((x) => { x.wins = 0; });
-        r.roundsPlayed = 0; r.matchWinnerId = null; r.tiebreak = false;
-        io.to('room:' + r.code).emit('events', [{ type: 'notEnough' }]);
-        broadcast(r);
-      } else {
-        afterAction(r);
-      }
-    } else {
-      io.to('room:' + r.code).emit('events', [{ type: 'playerLeft', playerId: m.id, name: m.name }]);
-      broadcast(r);
-    }
+    leaveCurrent();
     reply(cb, { ok: true });
   });
 

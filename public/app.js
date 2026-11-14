@@ -352,7 +352,7 @@
 
   socket.on('events', (evs) => {
     for (const e of evs) {
-      const who = nameOf(e.playerId);
+      const who = esc(nameOf(e.playerId)); // le nom est choisi par le joueur : jamais de HTML brut
       const mine = e.playerId === (st && st.you);
       switch (e.type) {
         case 'play': {
@@ -374,7 +374,7 @@
         case 'skip': toast(mine ? 'Tu sautes ton tour' : `${who} saute son tour`); break;
         case 'reshuffle': toast('La banque est remélangée'); break;
         case 'playerLeft': toast(`${esc(e.name)} a quitté la partie`, 'bad'); break;
-        case 'blocked': toast(`Plus personne ne peut jouer : ${mine ? 'tu gagnes' : esc(who) + ' gagne'} avec le moins de cartes`, 'good'); break;
+        case 'blocked': toast(`Plus personne ne peut jouer : ${mine ? 'tu gagnes' : who + ' gagne'} avec le moins de cartes`, 'good'); break;
         case 'restart': selected = null; toast("L'hôte recommence la manche"); break;
         case 'notEnough': toast('Plus assez de joueurs : retour au salon', 'bad'); break;
         case 'roundStart': lastTopId = null; lastTurnId = null; toast('Nouvelle manche !', 'good'); break;
